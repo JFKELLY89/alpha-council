@@ -76,3 +76,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+data/
+
+data/probe_results.json
