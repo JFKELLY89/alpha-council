@@ -1,0 +1,78 @@
+# =========================
+# Secrets / environment
+# =========================
+.env
+.env.*
+!.env.example
+
+secrets/
+tokens/
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+
+# =========================
+# Python virtual environment
+# =========================
+.venv/
+venv/
+env/
+
+
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+
+# =========================
+# Local databases / runtime data
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+
+# =========================
+# VS Code / MCP secrets
+# =========================
+.vscode/mcp.json
+
+.streamlit/secrets.toml
+
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+
+# =========================
+# Build artifacts
+# =========================
+build/
+dist/
+*.egg-info/

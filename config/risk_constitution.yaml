@@ -1,0 +1,115 @@
+# ======================================================================
+# Alpha Council v2.3 - config/risk_constitution.yaml
+#
+# Spec Section 16. The `hard` block is capital preservation and legality.
+# NOTHING relaxes it: not the adaptive tier ladder, not an LLM, not an
+# operator flag. Quality opinions about trade attractiveness live in
+# scoring.yaml under tiers.
+#
+# Every value here is enforced in code by alpha_council/risk/constitution.py
+# and covered by tests/test_risk.py. If a limit is not tested, it is not
+# enforced.
+# ======================================================================
+
+config_version: v1
+
+# ----------------------------------------------------------------------
+# HARD GATES - never relaxed
+# ----------------------------------------------------------------------
+hard:
+  paper_only: true
+
+  # sizing
+  max_risk_per_trade_pct: 2.0
+  max_total_open_option_risk_pct: 10.0
+  max_sector_open_risk_pct: 4.0
+  max_concurrent_positions: 5
+
+  # drawdown - failure of either returns HALT, not REJECT
+  max_daily_drawdown_pct: 5.0
+  max_competition_peak_drawdown_pct: 12.0
+
+  # instrument constraints
+  defined_risk_only: true
+  two_legs_only: true
+  allowed_strategies:
+    - BULL_CALL_DEBIT
+    - BEAR_PUT_DEBIT
+  allow_naked_options: false
+  allow_credit_spreads: false
+  allow_average_down: false
+  no_0dte: true
+  min_dte: 3
+
+  # timing
+  new_trade_cutoff_et: "15:20"
+  force_close_before_expiration_days: 2
+  competition_flatten_at: "2026-09-03T15:45:00-04:00"
+
+  # execution
+  max_limit_attempts: 3
+  never_exceed_natural_debit: true
+  require_pre_submit_refresh: true
+  require_unique_client_order_id: true
+
+# ----------------------------------------------------------------------
+# QUALITY - sizing preference, not a safety limit
+# ----------------------------------------------------------------------
+quality:
+  target_risk_per_trade_pct: 1.25
+  min_qty: 1
+
+# ----------------------------------------------------------------------
+# hard check evaluation order (spec Section 16.2)
+# Codified here so tests and the dashboard read the same list.
+# ----------------------------------------------------------------------
+check_order:
+  - {id: RISK_PAPER_MODE,          on_fail: HALT}
+  - {id: RISK_MARKET_CLOSED,       on_fail: REJECT}
+  - {id: RISK_AFTER_CUTOFF,        on_fail: REJECT}
+  - {id: RISK_DATA_BLOCKED,        on_fail: REJECT}
+  - {id: RISK_RED_TEAM_VETO,       on_fail: REJECT}
+  - {id: RISK_EVENT_BLACKOUT,      on_fail: REJECT}
+  - {id: RISK_STRATEGY_NOT_ALLOWED, on_fail: REJECT}
+  - {id: RISK_DTE_OUT_OF_BOUNDS,   on_fail: REJECT}
+  - {id: RISK_COST_TO_WIDTH,       on_fail: REJECT}
+  - {id: RISK_PER_TRADE_LOSS,      on_fail: RESIZE}
+  - {id: RISK_TOTAL_OPEN_RISK,     on_fail: RESIZE}
+  - {id: RISK_SECTOR_RISK,         on_fail: RESIZE}
+  - {id: RISK_MAX_POSITIONS,       on_fail: REJECT}
+  - {id: RISK_DAILY_DRAWDOWN,      on_fail: HALT}
+  - {id: RISK_COMPETITION_DRAWDOWN, on_fail: HALT}
+  - {id: RISK_DUPLICATE_ORDER,     on_fail: REJECT}
+  - {id: RISK_QTY_ZERO,            on_fail: REJECT}
+
+# ----------------------------------------------------------------------
+# exits (spec Section 18)
+# Primary triggers read the UNDERLYING, which is real-time on IEX.
+# Option-mark triggers are advisory unless data quality is HIGH/MEDIUM.
+# ----------------------------------------------------------------------
+exits:
+  primary:
+    underlying_target_at_short_strike: true
+    honor_pm_invalidation_rules: true
+    time_stop_dte: 2
+  secondary:
+    profit_target_pct_of_max: 0.55
+    premium_stop_pct_of_entry: 0.45
+    require_data_confidence: [HIGH, MEDIUM]
+  never_require_llm_to_exit: true
+
+# ----------------------------------------------------------------------
+# sector map for concentration limits
+# Coarse by design. Sector risk is a 4% cap, not a factor model.
+# ----------------------------------------------------------------------
+sectors:
+  TECH:        [AAPL, MSFT, NVDA, AVGO, AMD, MU, INTC, QCOM, ARM, ORCL, CRM,
+                ADBE, NOW, PLTR, IBM, CSCO, PANW, CRWD, SNOW, DELL]
+  COMM:        [GOOGL, META, NFLX, DIS]
+  CONS_DISC:   [AMZN, TSLA, HD, LOW, NKE, SBUX, MCD, UBER, ABNB, BKNG]
+  CONS_STAPLE: [WMT, COST]
+  FINANCIAL:   [JPM, BAC, WFC, GS, MS, C, SCHW, COIN, HOOD, SOFI]
+  ENERGY:      [XOM, CVX, COP, SLB]
+  HEALTH:      [LLY, UNH, JNJ, ABBV, MRK, PFE]
+  INDUSTRIAL:  [CAT, DE, GE, RTX, BA, UPS]
+  INDEX:       [SPY, QQQ, IWM, DIA]

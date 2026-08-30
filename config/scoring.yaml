@@ -1,0 +1,380 @@
+﻿# ======================================================================
+# Alpha Council v2.4 - config/scoring.yaml
+#
+# v2.4 changes from v2.3:
+#   * discovery: Core + Dynamic Discovery Universe, funnel caps, TTLs
+#   * breadth_expansion: search wider BEFORE lowering quality
+#   * Tier 3 no longer permits zero-volume legs or 28% spreads
+#   * EVENT and MOMENTUM weight sets, ranked with per-track quotas
+#   * execution fill-calibration caps
+#
+# The options.* values are PLACEHOLDERS. Friday's probe straddled the
+# closing bell and produced one valid in-session sample (option quote lag
+# 1.5s, equity lag 0.0s). Re-run scripts/probe_data_reality.py Monday
+# 09:45 ET and replace them with the Stage 4 output.
+#
+# Note on the Basic plan: the latest-15-minute restriction applies to
+# HISTORICAL queries, not to the age of latest snapshot quotes. Indicative
+# quotes may be timestamp-fresh and still be derived rather than OPRA NBBO.
+# Freshness and fidelity are separate problems and are handled separately.
+# ======================================================================
+
+config_version: v2.5
+
+# ----------------------------------------------------------------------
+# discovery funnel: 250 -> 30 -> 12 -> 5 -> <=3 councils
+# ----------------------------------------------------------------------
+discovery:
+  core_universe_always: true
+  max_dynamic_symbols: 250
+  stage0_top_n: 30
+  options_prescreen_top_n: 12
+  final_candidate_top_n: 5
+  dynamic_ttl_minutes: 90
+
+  enable_most_active: true
+  enable_movers: true
+  disable_source_on_403_for_session: true
+  event_injection_enabled: true
+  sec_global_injection_enabled: false   # SHOULD, not MVP-blocking
+
+  # Stage-0 must never fetch chains or call an LLM.
+  stage0_forbid_option_chain: true
+  stage0_forbid_llm: true
+
+  discovery_boost:
+    EVENT_FRESH_MATERIAL: 100
+    TOP10_MOVER: 80
+    TOP10_MOST_ACTIVE: 80
+    OTHER_DYNAMIC: 50
+    CORE: 40
+
+  # Deterministic retention order when >250 eligible symbols exist.
+  cap_priority:
+    - CORE
+    - EVENT_FRESH
+    - SCREENER_RANK
+    - DATA_DENSITY
+
+  eligibility:
+    require_tradable: true
+    require_has_options: true
+    min_price: 15.0
+    max_price: 2000.0
+    min_iex_bars_last_session: 40      # data-density proxy, RTH 5-min bars
+    min_recent_dollar_volume_proxy: 25000000
+
+fast_score_weights:
+  directional_conviction: 0.30         # abs(Momentum - 50) * 2
+  relative_volume: 0.25
+  relative_strength: 0.20
+  trend_regime: 0.15
+  discovery_boost: 0.10
+
+# ----------------------------------------------------------------------
+# breadth-first adaptive ladder
+# Expand the search before degrading trade quality.
+# ----------------------------------------------------------------------
+breadth_expansion:
+  first_expand_et: "11:00"
+  tier2_after_et: "12:30"
+  second_expand_et: "14:00"
+  tier3_after_et: "14:15"
+  pin_tier1_after_alpha_orders: 14
+  ratchet_down_within_session: false
+
+tiers:
+  1:
+    pre_score_floor: 62.0
+    final_score_floor: 68.0
+    pm_confidence_floor: 0.60
+    direction_ambiguity_floor: 0.15
+    max_cost_to_width: 0.55
+    long_delta: [0.52, 0.72]
+    short_delta: [0.22, 0.42]
+    long_delta_target: 0.60
+    short_delta_target: 0.33
+    min_open_interest: 250
+    min_volume: 25
+    max_leg_spread_pct: 0.15
+    dte: [7, 21]
+    max_councils_per_scan: 3
+    max_councils_per_day: 12
+
+  2:
+    pre_score_floor: 56.0
+    final_score_floor: 62.0
+    pm_confidence_floor: 0.55
+    direction_ambiguity_floor: 0.15
+    max_cost_to_width: 0.60
+    long_delta: [0.48, 0.78]
+    short_delta: [0.18, 0.46]
+    long_delta_target: 0.60
+    short_delta_target: 0.33
+    min_open_interest: 100
+    min_volume: 10
+    max_leg_spread_pct: 0.20
+    dte: [5, 30]
+    max_councils_per_scan: 3
+    max_councils_per_day: 16
+
+  3:
+    # v2.4: Tier 3 relaxes SCORE and CONFIDENCE, not liquidity.
+    # v2.3 allowed min_volume 0 and 28% spreads, which turned the
+    # anti-zero-trade mechanism into a licence to trade illiquid garbage.
+    pre_score_floor: 52.0
+    final_score_floor: 58.0
+    pm_confidence_floor: 0.52
+    direction_ambiguity_floor: 0.15
+    max_cost_to_width: 0.62
+    long_delta: [0.46, 0.80]
+    short_delta: [0.17, 0.48]
+    long_delta_target: 0.60
+    short_delta_target: 0.33
+    min_open_interest: 75
+    min_volume: 5
+    max_leg_spread_pct: 0.22
+    dte: [5, 30]
+    max_councils_per_scan: 4
+    max_councils_per_day: 18
+
+# Hard floor beneath every tier. The ladder may not go below these.
+liquidity_floor:
+  min_open_interest: 75
+  min_volume: 5
+  max_leg_spread_pct: 0.22
+  min_dte: 3
+
+# Reward/risk is DERIVED, never asserted: RR = (1 - c/w) / (c/w).
+# Tier 1 max_cost_to_width 0.55 implies RR >= 0.82.
+
+# ----------------------------------------------------------------------
+# candidate tracks
+# EVENT and MOMENTUM score on different scales because MOMENTUM carries no
+# ~50-neutral catalyst drag. Ranking them in one list biases toward
+# MOMENTUM, so the final 5 is filled by per-track quota instead.
+# ----------------------------------------------------------------------
+tracks:
+  rank_separately: true
+  final_quota:
+    EVENT: 3
+    MOMENTUM: 2
+  backfill_across_tracks: true   # unfilled EVENT slots may go to MOMENTUM
+  momentum_requires_no_contradicting_intel: true
+
+pre_score_weights_event:
+  momentum: 0.20
+  relative_volume: 0.20
+  trend_regime: 0.15
+  relative_strength: 0.15
+  catalyst: 0.20
+  corroboration: 0.05
+  novelty: 0.05
+
+pre_score_weights_momentum:
+  momentum: 0.30
+  relative_volume: 0.30
+  trend_regime: 0.20
+  relative_strength: 0.20
+
+opportunity_weights_event:
+  momentum: 0.15
+  relative_volume: 0.15
+  trend_regime: 0.10
+  relative_strength: 0.10
+  options_opportunity: 0.10
+  options_liquidity: 0.10
+  catalyst: 0.20
+  corroboration: 0.05
+  novelty: 0.05
+
+opportunity_weights_momentum:
+  momentum: 0.22
+  relative_volume: 0.22
+  trend_regime: 0.14
+  relative_strength: 0.14
+  options_opportunity: 0.14
+  options_liquidity: 0.14
+
+structure_weights:
+  liquidity: 0.30
+  reward_risk: 0.25
+  delta_fit: 0.20
+  dte_fit: 0.15
+  cost_efficiency: 0.10
+
+leg_liquidity_weights:
+  spread: 0.45
+  open_interest: 0.30
+  volume: 0.15
+  freshness: 0.10
+
+catalyst_weights:
+  materiality: 0.30
+  freshness: 0.20
+  source_reliability: 0.20
+  market_confirmation: 0.15
+  surprise: 0.15
+
+# ----------------------------------------------------------------------
+# data quality - REPLACE options.* FROM MONDAY PROBE
+# ----------------------------------------------------------------------
+options:
+  fresh_quote_seconds: 60
+  max_quote_lag_seconds: 1200
+  max_underlying_drift_pct: 0.010
+  high_confidence_max_drift_pct: 0.0025
+  medium_confidence_max_lag_seconds: 300
+  medium_confidence_max_drift_pct: 0.005
+  chain_cache_seconds: 60
+  structures_returned: 5
+  min_distinct_strike_pairs: 2
+  tick_size: 0.01
+
+  # Indicative != OPRA NBBO. Conservative limits apply even when the
+  # timestamp is fresh; the buffer is measured against real fills in Â§17.5.
+  indicative_buffer_min: 0.02
+  indicative_buffer_pct: 0.05
+
+equity:
+  scan_max_lag_seconds: 30
+  pre_submit_max_lag_seconds: 5
+  high_confidence_max_spread_pct: 0.005
+  medium_confidence_max_spread_pct: 0.015
+  degraded_confidence_max_spread_pct: 0.030
+  internal_divergence_pct: 0.015
+  bar_continuity_max_age_seconds: 600
+  halt_detection_no_trade_seconds: 300
+  prefer_last_trade_above_spread_pct: 0.010
+  rth_only_bars: true              # extended-hours bars corrupt the RVOL baseline
+
+confidence_factors:
+  HIGH: 1.00
+  MEDIUM: 0.92
+  DEGRADED: 0.80
+  BLOCKED: 0.00
+
+# ----------------------------------------------------------------------
+# execution fill calibration (v2.4 Â§17.5)
+# Measurement, not machine learning.
+# ----------------------------------------------------------------------
+fill_calibration:
+  enabled: true
+  min_calibration_fills_for_bias: 3
+  max_learned_fill_bias_abs: 0.10
+  max_learned_fill_bias_pct: 0.05
+  separate_open_close: true
+  separate_by_direction_if_n_gte: 6
+  exclude_marks_with_lag_above_seconds: 900
+  rolling_window_fills: 20
+
+# ----------------------------------------------------------------------
+# intelligence
+# ----------------------------------------------------------------------
+freshness_half_life_minutes:
+  social_rumor: 20
+  breaking_headline: 30
+  corporate_announcement: 120
+  macro_release: 120
+  earnings_guidance: 180
+  sec_filing: 240
+  routine_analysis: 720
+
+source_base_reliability:
+  government: 100
+  issuer_ir: 100
+  major_wire: 85
+  specialist: 70
+  social: 35
+  unknown: 20
+
+corroboration_by_cluster_count:
+  1: 45
+  2: 70
+  3: 85
+  4: 95
+tier1_primary_corroboration: 100
+tier1_primary_min_novelty: 70
+
+materiality_ranges:
+  earnings_guidance: [90, 100]
+  m_and_a: [75, 100]
+  major_contract: [75, 100]
+  regulatory: [75, 100]
+  litigation: [75, 100]
+  capital_action: [75, 100]
+  executive_change: [50, 80]
+  product_launch: [50, 80]
+  analyst_commentary: [30, 60]
+  routine_filing: [0, 40]
+
+regime_factors:
+  aligned: 1.00
+  neutral: 0.90
+  idiosyncratic_catalyst: 0.80
+  conflict: 0.00
+
+# ----------------------------------------------------------------------
+# AI models and budget
+# VERIFY THESE PRICES IN EACH PROVIDER CONSOLE BEFORE MONDAY.
+# ----------------------------------------------------------------------
+models:
+  bull:                {provider: openai,    model: gpt-5.6-luna,    reasoning: low,    evidence_cap_tokens: 3500}
+  bear:                {provider: openai,    model: gpt-5.6-luna,    reasoning: low,    evidence_cap_tokens: 3500}
+  catalyst:            {provider: openai,    model: gpt-5.6-luna,    reasoning: medium, evidence_cap_tokens: 3500}
+  portfolio_manager:   {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
+  structure_selection: {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 3000}
+  pm_revision:         {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 7000}
+  red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 8000}
+  briefing:            {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
+  lessons:             {provider: anthropic, model: claude-sonnet-5, effort: medium,    evidence_cap_tokens: 6000}
+
+model_prices:                      # USD per million tokens
+  gpt-5.6-luna:    {input: 0.20, output: 1.20}
+  gpt-5.6-sol:     {input: 4.00, output: 20.00}
+  claude-sonnet-5: {input: 2.00, output: 10.00}
+
+budget:
+  per_session_ceiling_usd: 0.75
+  daily_provider_ceiling_usd: 8.00
+  openai_total_usd: 50.00
+  anthropic_total_usd: 50.00
+  openai_reserve_at_usd: 44.00
+  openai_block_at_usd: 48.00
+  anthropic_reserve_at_usd: 44.00
+  anthropic_block_at_usd: 48.00
+
+# ----------------------------------------------------------------------
+# scheduling (America/New_York)
+# ----------------------------------------------------------------------
+schedule:
+  briefing_et: "08:45"
+  discovery_refresh_et: "09:35"
+  full_scans_et: ["09:40", "10:15", "11:30", "13:30", "15:00"]
+  breadth_check_et: ["11:00", "14:00"]
+  tier_check_et: ["12:30", "14:15"]
+  event_loop_seconds: 300
+  position_monitor_seconds: 120
+  sec_poll_seconds: 90
+  news_poll_seconds: 60
+  lessons_et: "16:15"
+
+# ----------------------------------------------------------------------
+# activity target (v2.4 Â§1.5)
+# Lifecycle demonstration is NOT a mandate to force alpha bets.
+# ----------------------------------------------------------------------
+activity_target:
+  min_order_lifecycles: 6
+  target_alpha_trades: [3, 8]
+  max_alpha_trades_before_concern: 20
+  calibration_trades_allowed: 3
+  calibration_trade_max_qty: 1
+  calibration_trade_symbols: [SPY, QQQ]   # tightest spreads available
+
+rate_limits:
+  alpaca_requests_per_minute: 150
+  alpaca_burst: 20
+  sec_requests_per_second: 5
+  max_retries: 4
+  backoff_base_seconds: 1.0
+  backoff_max_seconds: 30.0

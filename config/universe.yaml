@@ -1,0 +1,185 @@
+# ======================================================================
+# Alpha Council v2.4 - config/universe.yaml
+#
+# v2.4: the ~65-name list is the CORE UNIVERSE, not the search ceiling.
+# Core is always scanned. The Dynamic Discovery Universe adds up to 250
+# symbols from screeners, news, and SEC events, each with a TTL.
+#
+# BREAKING CHANGE from v2.3: the top-level key is now `core_symbols`,
+# not `symbols`. Update scripts/test_alpaca_data.py accordingly.
+# ======================================================================
+
+benchmarks:
+  broad: SPY
+  tech: QQQ
+  small_cap: IWM
+  dow: DIA
+
+benchmark_map:
+  TECH: QQQ
+  COMM: QQQ
+  CONS_DISC: SPY
+  CONS_STAPLE: SPY
+  FINANCIAL: SPY
+  ENERGY: SPY
+  HEALTH: SPY
+  INDUSTRIAL: SPY
+  INDEX: SPY
+  UNKNOWN: SPY          # dynamic symbols with no sector mapping
+
+core_symbols:
+  # index ETFs
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+
+  # semis and hardware
+  - NVDA
+  - AVGO
+  - AMD
+  - MU
+  - INTC
+  - QCOM
+  - ARM
+  - DELL
+
+  # mega-cap tech
+  - AAPL
+  - MSFT
+  - AMZN
+  - META
+  - GOOGL
+  - TSLA
+
+  # software and enterprise
+  - ORCL
+  - CRM
+  - ADBE
+  - NOW
+  - PLTR
+  - IBM
+  - CSCO
+  - PANW
+  - CRWD
+  - SNOW
+
+  # media
+  - NFLX
+  - DIS
+
+  # financials
+  - JPM
+  - BAC
+  - WFC
+  - GS
+  - MS
+  - C
+  - SCHW
+  - COIN
+  - HOOD
+  - SOFI
+
+  # energy
+  - XOM
+  - CVX
+  - COP
+  - SLB
+
+  # healthcare
+  - LLY
+  - UNH
+  - JNJ
+  - ABBV
+  - MRK
+  - PFE
+
+  # consumer
+  - WMT
+  - COST
+  - HD
+  - LOW
+  - NKE
+  - SBUX
+  - MCD
+
+  # industrials
+  - CAT
+  - DE
+  - GE
+  - RTX
+  - BA
+  - UPS
+
+  # travel and platforms
+  - UBER
+  - ABNB
+  - BKNG
+
+# ----------------------------------------------------------------------
+# dynamic discovery
+# ----------------------------------------------------------------------
+dynamic_discovery:
+  enabled: true
+  max_symbols: 250
+  ttl_minutes: 90
+
+  sources:
+    CORE:          {enabled: true,  optional: false}
+    ALPACA_NEWS:   {enabled: true,  optional: true}
+    SEC_EVENT:     {enabled: false, optional: true}   # SHOULD, not MVP-blocking
+    MOST_ACTIVE:   {enabled: true,  optional: true, top: 100}
+    MOVER:         {enabled: true,  optional: true, top: 50}
+
+  # An optional source that 403s is disabled for the session and logged
+  # once as DISCOVERY_SOURCE_FORBIDDEN. It never fails a scan.
+  fail_open_on_forbidden: true
+  probe_entitlement_once_per_session: true
+
+  # A dynamic symbol must clear all of these before any chain fetch.
+  eligibility:
+    require_active: true
+    require_tradable: true
+    require_has_options: true
+    require_us_equity_or_etf: true
+    min_price: 15.0
+    max_price: 2000.0
+    min_iex_bars_last_session: 40
+    min_recent_dollar_volume_proxy: 25000000
+    exclude_leveraged_etf_keywords: ["2X", "3X", "ULTRA", "BULL", "BEAR", "INVERSE"]
+
+# ----------------------------------------------------------------------
+# permanent exclusions
+# Applied to Core and dynamic symbols alike, each with a stated reason.
+# VERIFY the earnings-window entries before Monday; they are assumptions.
+# ----------------------------------------------------------------------
+exclusions:
+  - {symbol: GOOG,  reason: "duplicate share class of GOOGL; avoids double sector risk"}
+  - {symbol: RBLX,  reason: "thin IEX quoting observed; unreliable midpoint"}
+  - {symbol: ZS,    reason: "wide option spreads relative to debit at this size"}
+  - {symbol: HPE,   reason: "low option open interest in the 7-21 DTE window"}
+  - {symbol: FDX,   reason: "UNVERIFIED earnings inside competition window - confirm or restore"}
+  - {symbol: LULU,  reason: "UNVERIFIED earnings inside competition window - confirm or restore"}
+
+# Symbol classes never admitted by dynamic discovery regardless of screener rank.
+dynamic_blocklist_patterns:
+  - {pattern: "^[A-Z]{1,5}W$",  reason: "warrants"}
+  - {pattern: "^[A-Z]{1,4}U$",  reason: "SPAC units"}
+  - {pattern: "^[A-Z]{1,4}R$",  reason: "rights"}
+
+sectors:
+  TECH:        [AAPL, MSFT, NVDA, AVGO, AMD, MU, INTC, QCOM, ARM, ORCL, CRM,
+                ADBE, NOW, PLTR, IBM, CSCO, PANW, CRWD, SNOW, DELL]
+  COMM:        [GOOGL, META, NFLX, DIS]
+  CONS_DISC:   [AMZN, TSLA, HD, LOW, NKE, SBUX, MCD, UBER, ABNB, BKNG]
+  CONS_STAPLE: [WMT, COST]
+  FINANCIAL:   [JPM, BAC, WFC, GS, MS, C, SCHW, COIN, HOOD, SOFI]
+  ENERGY:      [XOM, CVX, COP, SLB]
+  HEALTH:      [LLY, UNH, JNJ, ABBV, MRK, PFE]
+  INDUSTRIAL:  [CAT, DE, GE, RTX, BA, UPS]
+  INDEX:       [SPY, QQQ, IWM, DIA]
+
+# Dynamic symbols with no sector mapping are assigned UNKNOWN and share a
+# single concentration bucket, so an unmapped cluster cannot evade the 4%
+# sector cap by being unclassified.
+unmapped_sector: UNKNOWN
