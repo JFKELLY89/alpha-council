@@ -165,18 +165,31 @@ class LLMClient:
 
     async def _journal(self, result: LLMResult, decision_id: str | None,
                        prompt: str, status: str) -> None:
-        await self.db.execute(
-            "INSERT INTO agent_runs(run_id, decision_id, agent_name, "
-            "provider, model, purpose, started_at, completed_at, input_hash, "
-            "prompt_text, output_json, input_tokens, output_tokens, cost_usd, "
-            "status, error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (new_uuid(), decision_id, result.purpose, result.provider,
-             result.model, result.purpose, iso_utc(), iso_utc(),
-             input_hash(prompt), prompt[:20000],
-             (result.parsed.model_dump_json() if result.parsed
-              else result.raw_text[:8000]),
-             result.input_tokens, result.output_tokens, result.cost_usd,
-             status, result.error))
+        """Record the call. A journalling failure must never discard a
+        model response: the audit row is valuable, the decision is more so."""
+        try:
+            await self.db.execute(
+                "INSERT INTO agent_runs(run_id, decision_id, agent_name, "
+                "provider, model, purpose, started_at, completed_at, "
+                "input_hash, prompt_text, output_json, input_tokens, "
+                "output_tokens, cost_usd, status, error) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (new_uuid(), decision_id, result.purpose, result.provider,
+                 result.model, result.purpose, iso_utc(), iso_utc(),
+                 input_hash(prompt), prompt[:20000],
+                 (result.parsed.model_dump_json() if result.parsed
+                  else result.raw_text[:8000]),
+                 result.input_tokens, result.output_tokens, result.cost_usd,
+                 status, result.error))
+        except Exception as exc:  # noqa: BLE001
+            # Retry without the foreign key rather than losing the record.
+            try:
+                await self.db.log_event(
+                    "ERROR", "llm", "AGENT_RUN_NOT_JOURNALLED",
+                    f"{result.purpose}: {type(exc).__name__}",
+                    {"error": str(exc)[:300], "decision_id": decision_id})
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def parse_structured(raw: str, schema: Type[T]) -> T:
