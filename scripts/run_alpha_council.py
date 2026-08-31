@@ -45,12 +45,14 @@ from alpha_council.agents.budget import BudgetManager  # noqa: E402
 from alpha_council.agents.council import Council  # noqa: E402
 from alpha_council.agents.llm import AnthropicClient, OpenAIClient  # noqa: E402
 from alpha_council.alpaca.market_data import MarketDataService  # noqa: E402
+from alpha_council.alpaca.mcp_client import AlpacaMCPClient, ControlPlane  # noqa: E402
 from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.alpaca.screeners import AssetCatalog, ScreenerService  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
 from alpha_council.db.engine import Database  # noqa: E402
 from alpha_council.execution.order_manager import OrderManager  # noqa: E402
 from alpha_council.execution.position_monitor import PositionMonitor  # noqa: E402
+from alpha_council.intelligence.news import NewsIntelligence  # noqa: E402
 from alpha_council.journal.marks import LiveMarkSource  # noqa: E402
 from alpha_council.journal.shadow_book import ShadowBook  # noqa: E402
 from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
@@ -120,6 +122,17 @@ async def run(args: argparse.Namespace) -> int:
         catalog = AssetCatalog(api)
         screeners = ScreenerService(api, db)
 
+        mcp = AlpacaMCPClient(settings, db)
+        mcp_ok = await mcp.connect()
+        control = ControlPlane(mcp, api, db)
+        if mcp_ok:
+            say(f"  MCP control plane: connected, "
+                f"{len(mcp.resolved)}/{len(mcp.tools)} tools resolved")
+        else:
+            say(f"  MCP control plane: UNAVAILABLE - {mcp.start_error}")
+            say("  WARNING: running on REST only. The hackathon requires "
+                "Alpaca's MCP server or CLI.")
+
         loaded = await catalog.load()
         say(f"  asset catalog    : {loaded:,} assets, "
             f"{catalog.options_enabled_count:,} optionable")
@@ -177,6 +190,7 @@ async def run(args: argparse.Namespace) -> int:
         monitor = PositionMonitor(db, market, orders, journal, scoring,
                                   risk_cfg)
 
+        news = NewsIntelligence(api, db, scoring)
         tiers = TierManager(scoring, config_version)
         tiers.start_session()
         orchestrator = Orchestrator(db, council, constitution, orders,
@@ -201,8 +215,9 @@ async def run(args: argparse.Namespace) -> int:
             db=db, scanner=scanner, orchestrator=orchestrator, tiers=tiers,
             monitor=monitor, shadows=shadows, journal=journal, orders=orders,
             market=market, screeners=screeners, budget=budget,
+            control=control,
             config=scoring, risk_config=risk_cfg,
-            universe_config=universe_cfg,
+            universe_config=universe_cfg, news=news,
             max_trades=args.max_trades, dry_run=args.dry_run)
 
         await db.log_event(
@@ -270,6 +285,8 @@ async def run(args: argparse.Namespace) -> int:
             for line, value in report.items():
                 say(f"  {line:<22}: {value}")
             say(f"  budget               : {budget.summary()}")
+            say(f"  mcp transport        : {control.summary()}")
+            await mcp.close()
 
             await db.log_event("INFO", "run_alpha_council", "SESSION_ENDED",
                                "clean shutdown", {"report": report})

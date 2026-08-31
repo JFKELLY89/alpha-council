@@ -1,4 +1,4 @@
-# ======================================================================
+﻿# ======================================================================
 # Alpha Council v2.3 - config/risk_constitution.yaml
 #
 # Spec Section 16. The `hard` block is capital preservation and legality.
@@ -42,7 +42,7 @@ hard:
   min_dte: 3
 
   # timing
-  new_trade_cutoff_et: "15:20"
+  new_trade_cutoff_et: "15:35"
   force_close_before_expiration_days: 2
   competition_flatten_at: "2026-09-03T15:45:00-04:00"
 

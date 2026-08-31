@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -33,7 +33,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from alpha_council.agents.evidence import EvidenceBuilder
 from alpha_council.db.engine import Database
+from alpha_council.intelligence.news import NewsIntelligence
 from alpha_council.journal.trade_journal import RejectionLog
+from alpha_council.quant.scoring import IntelSummary, summarize_intel
 from alpha_council.models.enums import DataConfidence, ExitReason
 from alpha_council.orchestrator import (
     DecisionOutcome,
@@ -66,7 +68,7 @@ class SchedulerConfig:
     tier_checks: list[str] = field(default_factory=lambda: ["12:30", "14:15"])
     monitor_seconds: int = 120
     event_loop_seconds: int = 300
-    new_trade_cutoff: str = "15:20"
+    new_trade_cutoff: str = "15:35"
     lessons_time: str = "16:15"
     flatten_time: str = "15:45"
 
@@ -93,6 +95,7 @@ class TradingSession:
                  market: Any, screeners: Any, budget: Any,
                  config: dict[str, Any], risk_config: dict[str, Any],
                  universe_config: dict[str, Any], control: Any = None,
+                 news: NewsIntelligence | None = None,
                  max_trades: int | None = None, dry_run: bool = False):
         self.db = db
         self.scanner = scanner
@@ -106,6 +109,7 @@ class TradingSession:
         self.screeners = screeners
         self.budget = budget
         self.control = control
+        self.news = news
         self.config = config
         self.risk_config = risk_config
         self.universe_config = universe_config
@@ -169,7 +173,18 @@ class TradingSession:
                                "could not read account state")
                 return
 
-            result = await self.scanner.run(scan_id, tier=self.tiers.tier)
+            # Discovery runs here so news can be fetched for the dynamic
+            # universe, not just Core. scanner.run() refreshes again, which
+            # costs two screener requests and keeps the scanner's contract
+            # unchanged.
+            now = utc_now()
+            symbols = await self.scanner.discovery.refresh(now=now)
+            intel, benchmark_return, _ = await self._gather_intelligence(
+                symbols, now)
+
+            result = await self.scanner.run(
+                scan_id, tier=self.tiers.tier, intel_by_symbol=intel,
+                benchmark_return=benchmark_return, now=now)
             await self.scanner.persist(result)
 
             await self.log("INFO", "SCAN_COMPLETE",
@@ -177,7 +192,12 @@ class TradingSession:
                            {"scan_id": scan_id,
                             "discovery": len(result.discovery_symbols),
                             "stage0": len(result.stage0),
+                            "prescored": len(result.prescored),
                             "final": len(result.final),
+                            "event_track": sum(
+                                1 for c in result.final
+                                if str(c.track) == "EVENT"),
+                            "benchmark_return": round(benchmark_return, 5),
                             "tier": self.tiers.tier})
 
             allowed, reason = self.can_open()
@@ -201,7 +221,7 @@ class TradingSession:
                     candidate, f"cand_{scan_id[-8:]}_{candidate.symbol}",
                     structures, builder, portfolio, self.summary.session_id,
                     equity_confidence=DataConfidence.HIGH,
-                    option_data_confidence=DataConfidence.HIGH,
+                    option_confidence=DataConfidence.HIGH,
                     rejections=rejections, execute=allowed)
 
                 self.summary.councils_run += 1
@@ -289,6 +309,56 @@ class TradingSession:
                         "budget": self.budget.summary()})
 
     # ---- helpers ------------------------------------------------------
+
+    async def _gather_intelligence(
+        self, symbols: Sequence[str], now: datetime
+    ) -> tuple[dict[str, IntelSummary], float, dict[str, float]]:
+        """Fetch news and price response for the discovery universe.
+
+        Returns (intel by symbol, benchmark return, day returns).
+
+        Every failure path returns empty rather than raising. A news outage
+        degrades every candidate to the MOMENTUM track, which is a worse
+        scan but still a scan; letting it abort would cost the whole cycle.
+        """
+        empty: dict[str, IntelSummary] = {}
+        try:
+            snapshots = await self.market.snapshots(list(symbols))
+        except Exception as exc:  # noqa: BLE001
+            await self.log("WARN", "INTEL_SNAPSHOTS_FAILED", str(exc)[:200])
+            return empty, 0.0, {}
+
+        returns: dict[str, float] = {}
+        for symbol, snap in snapshots.items():
+            prev_close = snap.prev_close
+            price = snap.quote.signal_price() or snap.mid
+            if prev_close and price and prev_close > 0:
+                returns[symbol] = (price - prev_close) / prev_close
+
+        benchmark = returns.get(
+            self.universe_config.get("benchmarks", {}).get("broad", "SPY"), 0.0)
+
+        if self.news is None:
+            return empty, benchmark, returns
+
+        try:
+            events = await self.news.collect(
+                list(symbols), lookback_hours=int(
+                    self.config.get("discovery", {}).get(
+                        "news_lookback_hours", 8)),
+                price_returns=returns, now=now)
+        except Exception as exc:  # noqa: BLE001
+            await self.log("WARN", "INTEL_COLLECT_FAILED", str(exc)[:200])
+            return empty, benchmark, returns
+
+        intel = {symbol: summarize_intel(evs)
+                 for symbol, evs in events.items() if evs}
+        material = sum(1 for s in intel.values() if s.has_material_catalyst)
+        await self.log(
+            "INFO", "INTEL_COLLECTED",
+            f"{self.news.stats.events} events, {material} material",
+            {**self.news.stats.as_dict(), "benchmark_return": benchmark})
+        return intel, benchmark, returns
 
     async def _portfolio_state(self) -> PortfolioState | None:
         # MCP first when available, REST otherwise. ControlPlane records
