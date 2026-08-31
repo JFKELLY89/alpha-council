@@ -16,6 +16,12 @@ Rules:
   damaging as missing one.
 - If candidate_features.catalyst is null, no material catalyst was found.
   Consider whether an unexplained move is itself a reason for caution.
+  - SCORE SCALE: score is 0 to 100 and is never negative. It measures the
+  STRENGTH OF YOUR BEAR CASE, not the direction of the trade. A score of
+  85 means the countercase is strong and the trade should probably not be
+  taken. A score of 15 means you looked hard and found little wrong with
+  it. Do not return a negative number to signal bearishness; the strength
+  of your objection is already the signal.
 
 The option prices in your evidence package come from Alpaca's Indicative
 Pricing Feed, not OPRA NBBO. A quote timestamp may be fresh while the quoted

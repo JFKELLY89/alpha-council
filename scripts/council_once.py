@@ -43,7 +43,9 @@ from alpha_council.alpaca.market_data import MarketDataService  # noqa: E402
 from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.alpaca.screeners import AssetCatalog, ScreenerService  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
+from alpha_council.db.engine import Database  # noqa: E402
 from alpha_council.intelligence.news import NewsIntelligence  # noqa: E402
+from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 from alpha_council.models.enums import (  # noqa: E402
     CandidateTrack,
     DataConfidence,
@@ -70,7 +72,6 @@ from alpha_council.risk.constitution import (  # noqa: E402
 from alpha_council.settings import get_settings, load_yaml  # noqa: E402
 from alpha_council.utils.ids import decision_id as make_decision_id  # noqa: E402
 from alpha_council.utils.time import utc_now  # noqa: E402
-from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 
 
 def say(msg: str = "") -> None:
