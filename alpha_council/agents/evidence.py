@@ -198,7 +198,8 @@ class EvidenceBuilder:
               analyst_outputs: Sequence[AnalystAssessment] = (),
               proposal: PortfolioProposal | None = None,
               selected_rank: int | None = None,
-              red_team_summary: dict[str, Any] | None = None
+              red_team_summary: dict[str, Any] | None = None,
+              scenario_payoffs: dict[str, Any] | None = None
               ) -> EvidencePackage:
         pkg = EvidencePackage(symbol=self.c.symbol, as_of=self.c.as_of,
                               role=role)
@@ -229,6 +230,13 @@ class EvidenceBuilder:
         if role in ("SELECTION", "RED_TEAM", "REVISION"):
             s["top_option_structures"] = [
                 _structure_dict(x) for x in self.structures[:5]]
+
+        # Deterministic payoffs under each scenario. The PM needs them to
+        # judge whether a spread expresses the thesis; the Red Team needs
+        # them for the trade-expression challenge.
+        if scenario_payoffs and role in ("PM", "SELECTION", "RED_TEAM",
+                                         "REVISION"):
+            s["scenario_payoffs"] = scenario_payoffs
 
         if analyst_outputs and role in ("PM", "RED_TEAM"):
             s["analyst_assessments"] = [{

@@ -29,6 +29,7 @@ from typing import Any, Sequence
 
 from alpha_council.agents.evidence import AgentRole, EvidenceBuilder
 from alpha_council.agents.llm import LLMClient, LLMResult
+from alpha_council.evolution.scenarios import ScenarioGenerator, ScenarioResult
 from alpha_council.models.candidate import AnalystAssessment, CandidateFeatures
 from alpha_council.models.enums import CandidateTrack, Direction, Verdict
 from alpha_council.models.trading import (
@@ -60,6 +61,7 @@ class CouncilOutcome:
     selected_structure: OptionStructure | None = None
     original_structure: OptionStructure | None = None
     review: RedTeamReview | None = None
+    scenarios: ScenarioResult | None = None
 
     cost_usd: float = 0.0
     calls: int = 0
@@ -88,6 +90,7 @@ class CouncilOutcome:
             "stopped_at": self.stopped_at, "reason": self.reason[:200],
             "verdict": str(self.verdict) if self.verdict else None,
             "structure_changed": self.structure_changed,
+            "scenarios": bool(self.scenarios and self.scenarios.usable),
             "calls": self.calls, "cost_usd": round(self.cost_usd, 4),
             "degraded": self.degraded,
         }
@@ -101,10 +104,12 @@ class Council:
     """Runs one full council session for one candidate."""
 
     def __init__(self, openai: LLMClient, anthropic: LLMClient,
-                 config: dict[str, Any]):
+                 config: dict[str, Any],
+                 scenarios: ScenarioGenerator | None = None):
         self.openai = openai
         self.anthropic = anthropic
         self.config = config
+        self.scenarios = scenarios
         self._prompts: dict[str, str] = {}
 
     def prompt(self, name: str) -> str:
@@ -163,10 +168,13 @@ class Council:
     async def propose(self, builder: EvidenceBuilder,
                       assessments: Sequence[AnalystAssessment],
                       decision_id: str, session_id: str,
-                      outcome: CouncilOutcome) -> PortfolioProposal | None:
+                      outcome: CouncilOutcome,
+                      payoffs: dict[str, Any] | None = None
+                      ) -> PortfolioProposal | None:
         pkg = builder.build("PM", cap_tokens=self._cap("portfolio_manager",
                                                        6000),
-                            analyst_outputs=assessments)
+                            analyst_outputs=assessments,
+                            scenario_payoffs=payoffs)
         result = await self.openai.call(
             "portfolio_manager", self.prompt("pm_system"), pkg,
             PortfolioProposal, decision_id=decision_id,
@@ -182,11 +190,12 @@ class Council:
                                proposal: PortfolioProposal,
                                structures: Sequence[OptionStructure],
                                decision_id: str, session_id: str,
-                               outcome: CouncilOutcome
+                               outcome: CouncilOutcome,
+                               payoffs: dict[str, Any] | None = None
                                ) -> OptionStructure | None:
         pkg = builder.build("SELECTION",
                             cap_tokens=self._cap("structure_selection", 3000),
-                            proposal=proposal)
+                            proposal=proposal, scenario_payoffs=payoffs)
         result = await self.openai.call(
             "structure_selection", self.prompt("pm_selection_system"), pkg,
             PortfolioProposal, decision_id=decision_id,
@@ -245,10 +254,13 @@ class Council:
                        proposal: PortfolioProposal, selected_rank: int,
                        assessments: Sequence[AnalystAssessment],
                        decision_id: str, session_id: str,
-                       outcome: CouncilOutcome) -> RedTeamReview | None:
+                       outcome: CouncilOutcome,
+                       payoffs: dict[str, Any] | None = None
+                       ) -> RedTeamReview | None:
         pkg = builder.build("RED_TEAM", cap_tokens=self._cap("red_team", 8000),
                             analyst_outputs=assessments, proposal=proposal,
-                            selected_rank=selected_rank)
+                            selected_rank=selected_rank,
+                            scenario_payoffs=payoffs)
         result = await self.anthropic.call(
             "red_team", self.prompt("red_team_system"), pkg, RedTeamReview,
             decision_id=decision_id, session_id=session_id,
@@ -278,9 +290,47 @@ class Council:
             outcome.gate_id = "COUNCIL_NO_STRUCTURES"
             return outcome
 
-        # 1. analysts
-        outcome.assessments = await self.run_analysts(
-            builder, decision_id, session_id, outcome)
+        # 1. analysts and scenarios, concurrently
+        #
+        # The generator runs in parallel deliberately: it must not see the
+        # Bull or Bear cases, or it would produce scenarios that agree with
+        # whichever argument was stronger. It describes the underlying, not
+        # the trade.
+        spot = structures[0].underlying_price or 0.0
+        if self.scenarios is not None and spot > 0:
+            analysts_task = self.run_analysts(
+                builder, decision_id, session_id, outcome)
+            scenario_task = self.scenarios.generate(
+                candidate, spot, structures, decision_id, session_id,
+                intel_events=builder.events,
+                market_summary=builder.market)
+            assessments, scenario_result = await asyncio.gather(
+                analysts_task, scenario_task, return_exceptions=True)
+
+            if isinstance(assessments, BaseException):
+                outcome.assessments = []
+                outcome.degraded.append(
+                    f"ANALYSTS: {type(assessments).__name__}")
+            else:
+                outcome.assessments = assessments
+
+            if isinstance(scenario_result, BaseException):
+                outcome.degraded.append(
+                    f"SCENARIOS: {type(scenario_result).__name__}")
+            else:
+                outcome.scenarios = scenario_result
+                outcome.calls += 1
+                outcome.cost_usd += scenario_result.cost_usd
+                if not scenario_result.usable:
+                    # A rejected scenario set is not a reason to stop. The
+                    # council proceeds without payoff tables, as it did
+                    # before this feature existed.
+                    outcome.degraded.append(
+                        f"SCENARIOS: {scenario_result.error}")
+        else:
+            outcome.assessments = await self.run_analysts(
+                builder, decision_id, session_id, outcome)
+
         if len(outcome.assessments) < MIN_ANALYSTS:
             outcome.stopped_at = "ANALYSTS"
             outcome.reason = (f"only {len(outcome.assessments)} of 3 analysts "
@@ -289,8 +339,12 @@ class Council:
             return outcome
 
         # 2. proposal
+        payoffs = (outcome.scenarios.evidence(spot)
+                   if outcome.scenarios and outcome.scenarios.usable else None)
+
         proposal = await self.propose(builder, outcome.assessments,
-                                      decision_id, session_id, outcome)
+                                      decision_id, session_id, outcome,
+                                      payoffs=payoffs)
         if proposal is None:
             outcome.stopped_at = "PM_PROPOSE"
             outcome.gate_id = "COUNCIL_PM_FAILED"
@@ -312,7 +366,8 @@ class Council:
 
         # 3. structure selection
         selected = await self.select_structure(
-            builder, proposal, structures, decision_id, session_id, outcome)
+            builder, proposal, structures, decision_id, session_id, outcome,
+            payoffs=payoffs)
         if selected is None:
             outcome.stopped_at = "STRUCTURE_SELECTION"
             outcome.gate_id = outcome.gate_id or "COUNCIL_NO_SELECTION"
@@ -323,7 +378,7 @@ class Council:
         # 4. red team
         review = await self.red_team(builder, proposal, selected.rank,
                                      outcome.assessments, decision_id,
-                                     session_id, outcome)
+                                     session_id, outcome, payoffs=payoffs)
         if review is None:
             outcome.stopped_at = "RED_TEAM"
             outcome.gate_id = "COUNCIL_RED_TEAM_FAILED"

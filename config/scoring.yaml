@@ -336,6 +336,7 @@ models:
   structure_selection: {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 3000}
   pm_revision:         {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 7000}
   red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 8000}
+  scenario_generator:  {provider: openai,    model: gpt-5.6-luna,    reasoning: medium, evidence_cap_tokens: 3500}
   briefing:            {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
   lessons:             {provider: anthropic, model: claude-sonnet-5, effort: medium,    evidence_cap_tokens: 6000}
 

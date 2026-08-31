@@ -44,6 +44,10 @@ from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.alpaca.screeners import AssetCatalog, ScreenerService  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
 from alpha_council.db.engine import Database  # noqa: E402
+from alpha_council.evolution.payoffs import PayoffEngine  # noqa: E402
+from alpha_council.evolution.scenarios import ScenarioGenerator  # noqa: E402
+from alpha_council.evolution.payoffs import PayoffEngine  # noqa: E402
+from alpha_council.evolution.scenarios import ScenarioGenerator  # noqa: E402
 from alpha_council.intelligence.news import NewsIntelligence  # noqa: E402
 from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 from alpha_council.models.enums import (  # noqa: E402
@@ -297,12 +301,15 @@ async def run(args: argparse.Namespace) -> int:
                 "ANTHROPIC_API_KEY in .env.")
             return 1
 
+        openai_client = OpenAIClient(
+            db, budget, scoring, settings.openai_api_key.get_secret_value())
         council = Council(
-            OpenAIClient(db, budget, scoring,
-                         settings.openai_api_key.get_secret_value()),
+            openai_client,
             AnthropicClient(db, budget, scoring,
                             settings.anthropic_api_key.get_secret_value()),
-            scoring)
+            scoring,
+            scenarios=ScenarioGenerator(openai_client, PayoffEngine(db),
+                                        db, scoring))
 
         evidence = EvidenceBuilder(
             candidate=scored, intel_events=[],
