@@ -158,8 +158,11 @@ exclusions:
   - {symbol: RBLX,  reason: "thin IEX quoting observed; unreliable midpoint"}
   - {symbol: ZS,    reason: "wide option spreads relative to debit at this size"}
   - {symbol: HPE,   reason: "low option open interest in the 7-21 DTE window"}
-  - {symbol: FDX,   reason: "UNVERIFIED earnings inside competition window - confirm or restore"}
-  - {symbol: LULU,  reason: "UNVERIFIED earnings inside competition window - confirm or restore"}
+  - {symbol: LULU,  reason: "confirmed earnings 2026-09-03 after close"}
+  - {symbol: DELL,  reason: "earnings 2026-09-01 after close, inside holding window"}
+  - {symbol: PANW,  reason: "earnings 2026-09-01 after close, inside holding window"}
+  - {symbol: AVGO,  reason: "earnings 2026-09-02 after close, inside holding window"}
+  - {symbol: SNOW,  reason: "earnings 2026-09-02 after close, inside holding window"}
 
 # Symbol classes never admitted by dynamic discovery regardless of screener rank.
 dynamic_blocklist_patterns:

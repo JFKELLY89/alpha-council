@@ -19,7 +19,7 @@
 # Freshness and fidelity are separate problems and are handled separately.
 # ======================================================================
 
-config_version: v2.5
+config_version: v2.5-measured
 
 # ----------------------------------------------------------------------
 # discovery funnel: 250 -> 30 -> 12 -> 5 -> <=3 councils
@@ -220,8 +220,11 @@ catalyst_weights:
 # data quality - REPLACE options.* FROM MONDAY PROBE
 # ----------------------------------------------------------------------
 options:
+  # Measured 2026-08-31 09:45 ET: option quote lag median 0.61s, p90 1.93s,
+  # p99 11.8s across 60 samples. The Indicative feed is effectively live on
+  # this account, so the delta adjustment is a guard rail, not a wall.
   fresh_quote_seconds: 60
-  max_quote_lag_seconds: 1200
+  max_quote_lag_seconds: 300
   max_underlying_drift_pct: 0.010
   high_confidence_max_drift_pct: 0.0025
   medium_confidence_max_lag_seconds: 300
@@ -238,7 +241,13 @@ options:
 
 equity:
   scan_max_lag_seconds: 30
+  # Equity quote lag measured at median 0.0s, p90 1.31s.
   pre_submit_max_lag_seconds: 5
+  # Deliberately NOT widened to the probe's suggested 0.0656. That figure
+  # came from JPM's 5.43% median IEX spread; raising the bar to accommodate
+  # it would mark every quote HIGH confidence. JPM and XOM are genuinely
+  # badly quoted on IEX and should score lower. prefer_last_trade below
+  # routes them to last trade instead of a fiction midpoint.
   high_confidence_max_spread_pct: 0.005
   medium_confidence_max_spread_pct: 0.015
   degraded_confidence_max_spread_pct: 0.030

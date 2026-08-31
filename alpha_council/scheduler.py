@@ -92,7 +92,7 @@ class TradingSession:
                  monitor: Any, shadows: Any, journal: Any, orders: Any,
                  market: Any, screeners: Any, budget: Any,
                  config: dict[str, Any], risk_config: dict[str, Any],
-                 universe_config: dict[str, Any],
+                 universe_config: dict[str, Any], control: Any = None,
                  max_trades: int | None = None, dry_run: bool = False):
         self.db = db
         self.scanner = scanner
@@ -105,6 +105,7 @@ class TradingSession:
         self.market = market
         self.screeners = screeners
         self.budget = budget
+        self.control = control
         self.config = config
         self.risk_config = risk_config
         self.universe_config = universe_config
@@ -290,9 +291,16 @@ class TradingSession:
     # ---- helpers ------------------------------------------------------
 
     async def _portfolio_state(self) -> PortfolioState | None:
+        # MCP first when available, REST otherwise. ControlPlane records
+        # which transport served the call, so the MCP share is measured.
         try:
-            account = await self.orders.api.get_account()
+            if self.control is not None:
+                account = await self.control.get_account()
+            else:
+                account = await self.orders.api.get_account()
         except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(account, dict):
             return None
 
         equity = float(account.get("equity", 0) or 0)

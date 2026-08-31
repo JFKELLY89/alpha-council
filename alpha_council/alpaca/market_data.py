@@ -249,12 +249,25 @@ class MarketDataService:
             RTH_BARS_PER_SESSION * sessions * 0.6)
         needed = []
         for sym in symbols:
-            have = await self.db.fetchvalue(
-                "SELECT COUNT(*) FROM market_bars "
+            row = await self.db.fetchone(
+                "SELECT COUNT(*) AS n, MAX(ts) AS last_ts FROM market_bars "
                 "WHERE symbol=? AND timeframe=? AND source=?",
                 (sym, BARS_TIMEFRAME, SOURCE_IEX),
             )
-            if (have or 0) < threshold:
+            have = (row or {}).get("n") or 0
+            if have < threshold:
+                needed.append(sym)
+                continue
+
+            # Enough history is not the same as current history. A symbol
+            # backfilled on a previous day passes the count check and then
+            # returns a stale RVOL forever, because the numerator needs
+            # bars from the CURRENT session.
+            last_ts = parse_alpaca_ts((row or {}).get("last_ts"))
+            if last_ts is None:
+                needed.append(sym)
+                continue
+            if to_et(last_ts).date() < to_et(utc_now()).date():
                 needed.append(sym)
         return await self.backfill_bars(needed, sessions) if needed else {}
 

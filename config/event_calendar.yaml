@@ -1,0 +1,59 @@
+﻿# Alpha Council - event blackout windows
+#
+# The Risk Constitution blocks new entries inside these windows. An event
+# not listed here does not exist as far as the system is concerned.
+#
+# symbols: scopes the window to those tickers. Omit it and the window
+# blocks EVERYTHING, which is right for macro and wrong for earnings.
+#
+# Earnings dates confirmed 2026-08-31 against Kiplinger / Briefing.com.
+
+events:
+  # ---- macro: blocks all symbols ----
+  - name: US International Trade in Goods and Services
+    source: BEA
+    timestamp_et: "2026-09-03T08:30:00-04:00"
+    pre_block_minutes: 15
+    post_block_minutes: 5
+
+  - name: Employment Situation - August 2026
+    source: BLS
+    timestamp_et: "2026-09-04T08:30:00-04:00"
+    pre_block_minutes: 15
+    post_block_minutes: 5
+
+  # ---- earnings: scoped to the reporting symbol ----
+  - name: Dell Technologies FQ2 earnings
+    source: earnings
+    timestamp_et: "2026-09-01T16:20:00-04:00"
+    pre_block_minutes: 30
+    post_block_minutes: 10
+    symbols: [DELL]
+
+  - name: Palo Alto Networks FQ4 earnings
+    source: earnings
+    timestamp_et: "2026-09-01T16:20:00-04:00"
+    pre_block_minutes: 30
+    post_block_minutes: 10
+    symbols: [PANW]
+
+  - name: Broadcom FQ3 earnings
+    source: earnings
+    timestamp_et: "2026-09-02T16:20:00-04:00"
+    pre_block_minutes: 30
+    post_block_minutes: 10
+    symbols: [AVGO]
+
+  - name: Snowflake FQ2 earnings
+    source: earnings
+    timestamp_et: "2026-09-02T16:20:00-04:00"
+    pre_block_minutes: 30
+    post_block_minutes: 10
+    symbols: [SNOW]
+
+  - name: Lululemon FQ2 earnings
+    source: earnings
+    timestamp_et: "2026-09-03T16:20:00-04:00"
+    pre_block_minutes: 30
+    post_block_minutes: 10
+    symbols: [LULU]

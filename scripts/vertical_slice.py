@@ -29,6 +29,7 @@ from alpha_council.alpaca.market_data import MarketDataService  # noqa: E402
 from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
 from alpha_council.db.engine import Database  # noqa: E402
+from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 from alpha_council.execution.order_manager import (  # noqa: E402
     OrderManager,
     walk_prices,
@@ -92,6 +93,32 @@ async def run(args: argparse.Namespace) -> int:
 
         await ensure_config_version(db, config_version, scoring, risk_cfg,
                                     tier=tier, note="vertical slice")
+
+        # orders.decision_id is a foreign key. Without the parent chain
+        # (scan_runs -> candidate_scores -> decisions) every write fails
+        # with IntegrityError AFTER the order has already filled at the
+        # broker, leaving a real position with no local record.
+        scan_id = f"scan_vs_{decision[-8:]}"
+        candidate_id = f"cand_vs_{decision[-8:]}"
+        now_iso = utc_now().isoformat()
+        await db.execute(
+            "INSERT OR IGNORE INTO scan_runs(scan_id, mode, config_version, "
+            "started_at, universe_size, candidate_count, status) "
+            "VALUES(?,'VERTICAL_SLICE',?,?,1,1,'COMPLETE')",
+            (scan_id, config_version, now_iso))
+        await db.execute(
+            "INSERT OR IGNORE INTO candidate_scores(candidate_id, scan_id, "
+            "config_version, symbol, direction, as_of, momentum_score, "
+            "relative_volume_score, trend_regime_score, "
+            "relative_strength_score, data_confidence_factor, regime_factor, "
+            "event_risk_factor, pre_score, discovery_source, "
+            "candidate_track, created_at) "
+            "VALUES(?,?,?,?,?,?,50,50,50,50,1,1,1,50,'CORE','CALIBRATION',?)",
+            (candidate_id, scan_id, config_version, args.symbol,
+             args.direction.upper(), now_iso, now_iso))
+        await TradeJournal(db).open_decision(
+            decision, candidate_id, args.symbol, config_version,
+            "CORE", CandidateTrack.CALIBRATION)
 
         market = MarketDataService(api, db)
         chains = ChainService(api, market,

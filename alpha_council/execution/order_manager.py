@@ -226,6 +226,23 @@ class OrderManager:
 
     async def _persist_order(self, intent: ExecutionIntent,
                              receipt: OrderReceipt) -> None:
+        """Record the order. A persistence failure after a live submission
+        is loud: the position exists at the broker either way, and a silent
+        failure means a real position with no local record."""
+        try:
+            await self._write_order(intent, receipt)
+        except Exception as exc:  # noqa: BLE001
+            await self.db.log_event(
+                "ERROR", "order_manager", "ORDER_NOT_PERSISTED",
+                f"{intent.client_order_id}: {type(exc).__name__}: {exc}"[:400],
+                {"client_order_id": intent.client_order_id,
+                 "alpaca_order_id": receipt.alpaca_order_id,
+                 "qty": intent.qty, "limit": intent.limit_debit})
+            print(f"[order_manager] ORDER FILLED BUT NOT RECORDED: "
+                  f"{receipt.alpaca_order_id} — {exc}", flush=True)
+
+    async def _write_order(self, intent: ExecutionIntent,
+                           receipt: OrderReceipt) -> None:
         await self.db.execute(
             "INSERT OR REPLACE INTO orders("
             "order_pk, decision_id, structure_id, client_order_id, "
