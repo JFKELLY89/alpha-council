@@ -43,7 +43,7 @@ from alpha_council.alpaca.market_data import MarketDataService  # noqa: E402
 from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.alpaca.screeners import AssetCatalog, ScreenerService  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
-from alpha_council.db.engine import Database  # noqa: E402
+from alpha_council.intelligence.news import NewsIntelligence  # noqa: E402
 from alpha_council.models.enums import (  # noqa: E402
     CandidateTrack,
     DataConfidence,
@@ -54,7 +54,12 @@ from alpha_council.models.enums import (  # noqa: E402
 from alpha_council.options_engine.chain import ChainFilters, ChainService  # noqa: E402
 from alpha_council.options_engine.spreads import SpreadBuilder, SpreadFilters  # noqa: E402
 from alpha_council.quant.discovery import DiscoveryService, UniverseManager  # noqa: E402
-from alpha_council.quant.scoring import IntelSummary, build_candidate  # noqa: E402
+from alpha_council.quant.scoring import (  # noqa: E402
+    IntelSummary,
+    build_candidate,
+    classify_track,
+    summarize_intel,
+)
 from alpha_council.risk.constitution import (  # noqa: E402
     PortfolioState,
     RiskConstitution,
@@ -162,10 +167,25 @@ async def run(args: argparse.Namespace) -> int:
         say(f"  trend/regime   : {result.trend_regime:.1f}")
         say(f"  last price     : {result.indicators.last_price:.2f}")
 
-        # No intelligence collectors yet, so every candidate is MOMENTUM.
-        # A fabricated catalyst here would be worse than none.
+        news = NewsIntelligence(api, db, scoring)
+        snap = (await market.snapshots([args.symbol])).get(args.symbol)
+        day_return = None
+        price = snap.quote.signal_price() or snap.mid if snap else None
+        if snap and snap.prev_close and price:
+            day_return = (price - snap.prev_close) / snap.prev_close
+        events = await news.collect([args.symbol], lookback_hours=24,
+                                    price_returns={args.symbol: day_return}
+                                    if day_return is not None else {})
+        intel = summarize_intel(events.get(args.symbol, []))
+        track = classify_track(intel, result.source, direction)
+        say(f"  news events    : {intel.event_count}")
+        say(f"  catalyst       : "
+            f"{intel.catalyst_score:.1f}" if intel.event_count
+            else "  catalyst       : none")
+        say(f"  track          : {track}")
+
         candidate = build_candidate(
-            result, IntelSummary(), CandidateTrack.MOMENTUM, as_of=utc_now(),
+            result, intel, track, as_of=utc_now(),
             options_opportunity=0.0, options_liquidity=0.0,
             weights=scoring, tier=args.tier, config_version=config_version)
         say(f"  pre score      : {candidate.pre_score:.1f}")

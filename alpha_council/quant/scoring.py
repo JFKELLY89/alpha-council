@@ -31,7 +31,7 @@ from alpha_council.utils.math import clip, weighted_sum
 # candidate EVENT rather than MOMENTUM. Below the bar the intelligence is
 # background context, not a reason to trade.
 EVENT_CATALYST_FLOOR = 55.0
-EVENT_FRESHNESS_FLOOR = 40.0
+EVENT_FRESHNESS_FLOOR = 25.0
 
 DEFAULT_PRE_WEIGHTS_EVENT = {
     "momentum": 0.20, "relative_volume": 0.20, "trend_regime": 0.15,
