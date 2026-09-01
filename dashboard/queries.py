@@ -457,6 +457,47 @@ def get_decision_discovery(
         database_path, _DECISION_DISCOVERY_SQL, {"decision_id": decision_id}
     )
 
+_DECISION_INTELLIGENCE_SQL = """
+SELECT
+    event.event_type,
+    event.direction,
+    event.direction_confidence,
+    event.catalyst_score,
+    event.materiality_score,
+    event.freshness_score,
+    event.novelty_score,
+    event.corroboration_score,
+    event.market_confirmation_score,
+    event.provisional,
+    event.extracted_facts_json,
+    event.evidence_urls_json,
+    event.created_at,
+    item.title,
+    item.url,
+    item.source_tier
+FROM intelligence_events AS event
+JOIN decisions AS decision ON decision.symbol = event.symbol
+LEFT JOIN intelligence_items AS item ON item.item_id = event.item_id
+WHERE decision.decision_id = :decision_id
+  AND event.created_at <= decision.created_at
+  AND event.created_at >= datetime(decision.created_at, '-8 hours')
+ORDER BY event.catalyst_score DESC
+LIMIT 12
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_decision_intelligence(
+    database_path: str | Path, decision_id: str
+) -> pd.DataFrame:
+    """News events that were in scope when this decision was made.
+
+    Joined on symbol and time window rather than a foreign key: events are
+    collected per scan, not per decision, so there is no direct link.
+    """
+    return _read_frame(
+        database_path, _DECISION_INTELLIGENCE_SQL, {"decision_id": decision_id}
+    )
 
 _AGENT_RUNS_SQL = """
 SELECT
@@ -599,6 +640,7 @@ def get_trade_outcome(database_path: str | Path, decision_id: str) -> pd.DataFra
     return _read_frame(
         database_path, _TRADE_OUTCOME_SQL, {"decision_id": decision_id}
     )
+
 
 
 # ---------------------------------------------------------------------------

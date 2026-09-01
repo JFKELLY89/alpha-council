@@ -312,7 +312,8 @@ async def run(args: argparse.Namespace) -> int:
                                         db, scoring))
 
         evidence = EvidenceBuilder(
-            candidate=scored, intel_events=[],
+            candidate=scored,
+            intel_events=events.get(args.symbol, []),
             structures=spreads.structures,
             portfolio_state={"equity": 100000.0, "open_positions": 0,
                              "open_risk_pct": 0.0},

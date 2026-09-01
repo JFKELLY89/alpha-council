@@ -174,6 +174,29 @@ def render(database_path: str | Path) -> None:
         st.dataframe(reasons, use_container_width=True, hide_index=True)
         st.caption("Discovery reasons are shown verbatim.")
 
+    intel = queries.get_decision_intelligence(database_path, decision_id)
+    if not intel.empty:
+        st.markdown("**Intelligence in scope**")
+        display = intel[["title", "event_type", "direction",
+                         "catalyst_score", "materiality_score",
+                         "freshness_score", "created_at"]].copy()
+        display["created_at"] = display["created_at"].map(format_et)
+        st.dataframe(
+            display, use_container_width=True, hide_index=True,
+            column_config={
+                "catalyst_score": st.column_config.NumberColumn(
+                    "Catalyst", format="%.1f"),
+                "materiality_score": st.column_config.NumberColumn(
+                    "Material", format="%.0f"),
+                "freshness_score": st.column_config.NumberColumn(
+                    "Fresh", format="%.0f"),
+            })
+        st.caption(
+            "Events within 8 hours before the decision. Direction is "
+            "resolved from price response, not headline tone.")
+    else:
+        st.caption("No intelligence events were in scope for this decision.")
+
     runs = queries.get_agent_runs(database_path, decision_id)
     st.markdown("### 2. Bull, Bear, and Catalyst assessments")
     analyst_runs = runs[runs["agent_name"].str.lower().isin(ANALYSTS)] if not runs.empty else runs

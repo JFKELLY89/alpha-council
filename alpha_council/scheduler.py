@@ -180,8 +180,8 @@ class TradingSession:
             # unchanged.
             now = utc_now()
             symbols = await self.scanner.discovery.refresh(now=now)
-            intel, benchmark_return, _ = await self._gather_intelligence(
-                symbols, now)
+            intel, benchmark_return, _, raw_events = \
+                await self._gather_intelligence(symbols, now)
 
             result = await self.scanner.run(
                 scan_id, tier=self.tiers.tier, intel_by_symbol=intel,
@@ -212,7 +212,8 @@ class TradingSession:
 
                 self.summary.candidates_evaluated += 1
                 builder = EvidenceBuilder(
-                    candidate=candidate, intel_events=[],
+                    candidate=candidate,
+                    intel_events=raw_events.get(candidate.symbol, []),
                     structures=structures,
                     portfolio_state=self._portfolio_summary(portfolio),
                     market_summary={"tier": self.tiers.tier},
@@ -316,7 +317,8 @@ class TradingSession:
 
     async def _gather_intelligence(
         self, symbols: Sequence[str], now: datetime
-    ) -> tuple[dict[str, IntelSummary], float, dict[str, float]]:
+    ) -> tuple[dict[str, IntelSummary], float, dict[str, float],
+               dict[str, list[Any]]]:
         """Fetch news and price response for the discovery universe.
 
         Returns (intel by symbol, benchmark return, day returns).
@@ -330,7 +332,7 @@ class TradingSession:
             snapshots = await self.market.snapshots(list(symbols))
         except Exception as exc:  # noqa: BLE001
             await self.log("WARN", "INTEL_SNAPSHOTS_FAILED", str(exc)[:200])
-            return empty, 0.0, {}
+            return empty, 0.0, {}, {}
 
         returns: dict[str, float] = {}
         for symbol, snap in snapshots.items():
@@ -343,7 +345,7 @@ class TradingSession:
             self.universe_config.get("benchmarks", {}).get("broad", "SPY"), 0.0)
 
         if self.news is None:
-            return empty, benchmark, returns
+            return empty, benchmark, returns, {}
 
         try:
             events = await self.news.collect(
@@ -353,7 +355,7 @@ class TradingSession:
                 price_returns=returns, now=now)
         except Exception as exc:  # noqa: BLE001
             await self.log("WARN", "INTEL_COLLECT_FAILED", str(exc)[:200])
-            return empty, benchmark, returns
+            return empty, benchmark, returns, {}
 
         intel = {symbol: summarize_intel(evs)
                  for symbol, evs in events.items() if evs}
@@ -362,7 +364,10 @@ class TradingSession:
             "INFO", "INTEL_COLLECTED",
             f"{self.news.stats.events} events, {material} material",
             {**self.news.stats.as_dict(), "benchmark_return": benchmark})
-        return intel, benchmark, returns
+        # The scorer needs summaries; the evidence builder needs the raw
+        # events. Returning only summaries left every Catalyst analyst
+        # reporting an empty intelligence set.
+        return intel, benchmark, returns, dict(events)
 
     async def _portfolio_state(self) -> PortfolioState | None:
         # MCP first when available, REST otherwise. ControlPlane records
