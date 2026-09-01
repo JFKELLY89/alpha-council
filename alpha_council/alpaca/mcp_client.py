@@ -91,7 +91,19 @@ class AlpacaMCPClient:
 
     def __init__(self, settings: Settings, db: Database | None = None,
                  command: str = "uvx",
-                 args: tuple[str, ...] = ("alpaca-mcp-server",)):
+                 args: tuple[str, ...] | None = None):
+        # The server reads credentials from its own environment and exits
+        # immediately if they are absent. Passing them through
+        # StdioServerParameters.env is unreliable on Windows, so use the
+        # --env-file flag the server documents instead.
+        from alpha_council.settings import REPO_ROOT
+
+        if args is None:
+            # fastmcp>=4 removed fastmcp.tools.tool and fastmcp<3 lacks
+            # fastmcp.server.providers; alpaca-mcp-server needs the 3.x
+            # layout and does not pin it, so the pin lives here.
+            args = ("--with", "fastmcp>=3,<4", "alpaca-mcp-server",
+                    "--env-file", str(REPO_ROOT / ".env"))
         self.settings = settings
         self.db = db
         self.command = command

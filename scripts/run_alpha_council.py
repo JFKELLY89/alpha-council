@@ -234,6 +234,10 @@ async def run(args: argparse.Namespace) -> int:
             rule("RESULT")
             for line, value in session.summary.report().items():
                 say(f"  {line:<22}: {value}")
+            # The MCP stdio subprocess keeps the event loop alive; without
+            # this the process hangs after the scan completes.
+            say(f"  mcp transport         : {control.summary()}")
+            await mcp.close()
             return 0
 
         # ---- scheduled mode -------------------------------------------
