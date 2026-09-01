@@ -250,14 +250,29 @@ class Orchestrator:
             candidate.track)
 
         # --- 1. council ---------------------------------------------
+        # Stage markers land in system_events so a scheduled run that
+        # stalls can be diagnosed after the fact. The scheduler logs only
+        # on completion, which makes a slow stage and a hung one identical
+        # from outside.
         await self.journal.transition(decision_id, DecisionState.COUNCIL_STARTED)
+        await self.db.log_event(
+            "INFO", "orchestrator", "STAGE_COUNCIL_START",
+            f"{candidate.symbol} council starting",
+            {"decision_id": decision_id, "structures": len(structures)})
+
         council = await self.council.run(candidate, structures, builder,
                                          decision_id, session_id)
+
+        await self.db.log_event(
+            "INFO", "orchestrator", "STAGE_COUNCIL_DONE",
+            f"{candidate.symbol} {council.stopped_at}",
+            {"decision_id": decision_id, "traded": council.traded,
+             "calls": council.calls, "cost_usd": round(council.cost_usd, 4)})
         outcome.council = council
         outcome.cost_usd = council.cost_usd
 
         if council.proposal is not None:
-            await self.journal.record_proposal(council.proposal)
+            await self.journal.record_proposal(council.proposal, decision_id)
             await self.journal.transition(decision_id,
                                           DecisionState.PM_PROPOSED)
         await self.journal.record_structures(decision_id, structures,
@@ -278,7 +293,7 @@ class Orchestrator:
             await self._create_claude_variant(decision_id, council, portfolio)
 
         if council.revision is not None:
-            await self.journal.record_proposal(council.revision)
+            await self.journal.record_proposal(council.revision, decision_id)
 
         if not council.traded:
             outcome.stage = council.stopped_at
@@ -348,6 +363,10 @@ class Orchestrator:
             return outcome
 
         # --- 3. execution ---------------------------------------------
+        await self.db.log_event(
+            "INFO", "orchestrator", "STAGE_SUBMITTING",
+            f"{candidate.symbol} qty {evaluation.approved_qty}",
+            {"decision_id": decision_id})
         await self.journal.transition(decision_id,
                                       DecisionState.ORDER_SUBMITTED)
         max_debit = (evaluation.approved_max_loss

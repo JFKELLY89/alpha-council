@@ -100,8 +100,17 @@ class TradeJournal:
 
     # ---- proposals and reviews ---------------------------------------
 
-    async def record_proposal(self, proposal: PortfolioProposal) -> str:
-        proposal_id = f"prop_{proposal.decision_id[-8:]}_r{proposal.revision}"
+    async def record_proposal(self, proposal: PortfolioProposal,
+                              decision_id: str | None = None) -> str:
+        """Record a PM proposal.
+
+        decision_id is ours, not the model's. PortfolioProposal carries the
+        field because the schema requires it, but a model can return any
+        string there and the foreign key would fail. The caller's value
+        wins.
+        """
+        decision_id = decision_id or proposal.decision_id
+        proposal_id = f"prop_{decision_id[-8:]}_r{proposal.revision}"
         await self.db.execute(
             "INSERT OR REPLACE INTO trade_proposals(proposal_id, decision_id, "
             "revision, symbol, trade, direction, confidence, "
@@ -110,7 +119,7 @@ class TradeJournal:
             "key_contrary_evidence_json, invalidation_json, "
             "selected_structure_rank, abstain_reason, created_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (proposal_id, proposal.decision_id, proposal.revision,
+            (proposal_id, decision_id, proposal.revision,
              proposal.symbol, 1 if proposal.trade else 0,
              str(proposal.direction), proposal.confidence,
              proposal.expected_horizon_days,

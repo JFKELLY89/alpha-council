@@ -51,6 +51,10 @@ class ScanResult:
     structures: dict[str, list[OptionStructure]] = field(default_factory=dict)
     rejections: list[tuple[str, str, str, GateStage]] = field(default_factory=list)
     chain_fetches: int = 0
+    # symbol -> the candidate_id actually written to candidate_scores.
+    # candidate_id() carries a random suffix, so a second caller deriving
+    # it independently gets a different value and the foreign key fails.
+    candidate_ids: dict[str, str] = field(default_factory=dict)
 
     def snapshot(self) -> FunnelSnapshot:
         sources: dict[str, int] = {}
@@ -115,8 +119,12 @@ class FunnelScanner:
                          else Direction.BEARISH)
             track = classify_track(intel, s.source, direction)
 
-            if (track is CandidateTrack.MOMENTUM
-                    and intel.contradicts(direction)):
+            # Previously restricted to MOMENTUM, which let an EVENT
+            # candidate reach council with its catalyst pointing the
+            # opposite way to its technical direction. UNH scanned BEARISH
+            # on a bullish catalyst and the PM correctly refused to trade
+            # against its own evidence. The check belongs on both tracks.
+            if intel.contradicts(direction):
                 result.rejections.append(
                     (s.symbol, "INTEL_CONTRADICTS_DIRECTION",
                      f"{intel.direction} vs {direction}", GateStage.PRESCORE))
@@ -220,8 +228,10 @@ class FunnelScanner:
         rows = []
         for c in result.final + [x for x in result.prescreened
                                  if x not in result.final]:
+            cid = result.candidate_ids.setdefault(
+                c.symbol, candidate_id(result.scan_id, c.symbol))
             rows.append((
-                candidate_id(result.scan_id, c.symbol), result.scan_id,
+                cid, result.scan_id,
                 c.config_version, c.symbol, str(c.direction), iso_utc(c.as_of),
                 c.momentum_score, c.relative_volume_score,
                 c.trend_regime_score, c.relative_strength_score,

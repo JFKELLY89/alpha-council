@@ -223,7 +223,7 @@ class TradingSession:
                 # or decisions.candidate_id violates its foreign key after
                 # the council has already run.
                 outcome = await self.orchestrator.evaluate_candidate(
-                    candidate, make_candidate_id(scan_id, candidate.symbol),
+                    candidate, result.candidate_ids[candidate.symbol],
                     structures, builder, portfolio, self.summary.session_id,
                     equity_confidence=DataConfidence.HIGH,
                     option_confidence=DataConfidence.HIGH,
