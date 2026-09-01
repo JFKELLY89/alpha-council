@@ -45,6 +45,7 @@ from alpha_council.orchestrator import (
 )
 from alpha_council.quant.scanner import FunnelScanner
 from alpha_council.risk.constitution import PortfolioState
+from alpha_council.utils.ids import candidate_id as make_candidate_id
 from alpha_council.utils.ids import scan_id as make_scan_id
 from alpha_council.utils.time import (
     ET,
@@ -217,8 +218,11 @@ class TradingSession:
                     market_summary={"tier": self.tiers.tier},
                     scheduled_events=[])
 
+                # Must match the ID the scanner wrote into candidate_scores,
+                # or decisions.candidate_id violates its foreign key after
+                # the council has already run.
                 outcome = await self.orchestrator.evaluate_candidate(
-                    candidate, f"cand_{scan_id[-8:]}_{candidate.symbol}",
+                    candidate, make_candidate_id(scan_id, candidate.symbol),
                     structures, builder, portfolio, self.summary.session_id,
                     equity_confidence=DataConfidence.HIGH,
                     option_confidence=DataConfidence.HIGH,
@@ -363,13 +367,21 @@ class TradingSession:
     async def _portfolio_state(self) -> PortfolioState | None:
         # MCP first when available, REST otherwise. ControlPlane records
         # which transport served the call, so the MCP share is measured.
-        try:
-            if self.control is not None:
+        account: Any = None
+        if self.control is not None:
+            try:
                 account = await self.control.get_account()
-            else:
+            except Exception:  # noqa: BLE001
+                account = None
+        # MCP may return a wrapped or non-dict payload. An unreadable
+        # control-plane response must never abort the scan: fall through to
+        # REST, which is the authoritative source anyway.
+        if not isinstance(account, dict) or "equity" not in account:
+            try:
                 account = await self.orders.api.get_account()
-        except Exception:  # noqa: BLE001
-            return None
+            except Exception as exc:  # noqa: BLE001
+                await self.log("ERROR", "ACCOUNT_READ_FAILED", str(exc)[:200])
+                return None
         if not isinstance(account, dict):
             return None
 

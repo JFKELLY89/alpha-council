@@ -19,6 +19,7 @@ import json
 from typing import Any
 
 from alpha_council.db.engine import Database, utc_now
+from alpha_council.utils.ids import new_uuid
 
 
 async def ensure_config_version(db: Database, version: str,
@@ -67,7 +68,10 @@ async def record_tier_change(db: Database, base_version: str, new_tier: int,
     reconstructable after the fact.
     """
     stamp = utc_now()
-    version = f"{base_version}-t{new_tier}-{stamp[11:19].replace(':', '')}"
+    # Second-resolution timestamps collide when two transitions land in the
+    # same second, or when a prior run already used that string.
+    version = (f"{base_version}-t{new_tier}-"
+               f"{stamp[11:19].replace(':', '')}-{new_uuid()[:4]}")
 
     await db.execute(
         "UPDATE config_versions SET deactivated_at=? "

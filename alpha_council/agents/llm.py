@@ -234,7 +234,10 @@ class OpenAIClient(LLMClient):
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=self.api_key)
+            # Without a timeout a stalled request hangs the whole council,
+            # and with it the scan and every job behind it.
+            self._client = AsyncOpenAI(api_key=self.api_key, timeout=90.0,
+                                       max_retries=1)
         return self._client
 
     async def _invoke(self, model: str, system: str, user: str,
@@ -318,7 +321,8 @@ class AnthropicClient(LLMClient):
         if self._client is None:
             from anthropic import AsyncAnthropic
 
-            self._client = AsyncAnthropic(api_key=self.api_key)
+            self._client = AsyncAnthropic(api_key=self.api_key, timeout=90.0,
+                                          max_retries=1)
         return self._client
 
     async def _invoke(self, model: str, system: str, user: str,
