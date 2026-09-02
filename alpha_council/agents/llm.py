@@ -377,13 +377,18 @@ class AnthropicClient(LLMClient):
                 "format": {"type": "json_schema",
                            "schema": anthropic_safe_schema(
                                schema.model_json_schema())}}
-        if "effort" not in omit and settings.get("effort"):
-            kwargs["effort"] = settings["effort"]
+            # effort rides INSIDE output_config on the current API. As a
+            # top-level kwarg the SDK rejected it on every call all day
+            # 09-02 (PARAM_DROPPED), so scoring.yaml's effort settings
+            # never actually applied.
+            if "effort" not in omit and settings.get("effort"):
+                kwargs["output_config"]["effort"] = settings["effort"]
 
         try:
             resp = await client.messages.create(**kwargs)
         except Exception as exc:  # noqa: BLE001
-            dropped = self._drop_param(exc, kwargs)
+            dropped = (self._drop_nested_effort(exc, kwargs)
+                       or self._drop_param(exc, kwargs))
             if dropped is None:
                 raise
             await self.db.log_event(
@@ -416,6 +421,20 @@ class AnthropicClient(LLMClient):
             if param in kwargs and param in message:
                 self.dropped_params.add(param)
                 return param
+        return None
+
+    def _drop_nested_effort(self, exc: Exception,
+                            kwargs: dict[str, Any]) -> str | None:
+        """output_config.effort is newer than output_config.format; a
+        server that rejects only the effort key must not cost us the
+        whole structured-output schema. Checked before _drop_param, which
+        would otherwise match 'output_config' and drop both."""
+        oc = kwargs.get("output_config")
+        if (isinstance(oc, dict) and "effort" in oc
+                and "effort" in str(exc).lower()):
+            oc.pop("effort")
+            self.dropped_params.add("output_config.effort")
+            return "output_config.effort"
         return None
 
 
