@@ -131,6 +131,14 @@ class TradeRequest:
     final_opportunity_score: float
     market_open: bool = True
     is_calibration_trade: bool = False
+    # The PM's original (pre-Red-Team) confidence. The floor tests
+    # conviction; the Red Team's discount prices its concerns through
+    # red_team_max_risk_pct (sizing), not through a second floor test.
+    pm_conviction: float | None = None
+    # "EVENT" | "MOMENTUM" | "CALIBRATION"; lets the score floor use the
+    # event-track bar, since EVENT scores carry the ~50-neutral catalyst
+    # drag that MOMENTUM scoring omits.
+    candidate_track: str | None = None
 
 
 class RiskConstitution:
@@ -285,14 +293,26 @@ class RiskConstitution:
         # liquidity floor) still binds identically.
         if not request.is_calibration_trade:
             floor = float(tier_cfg.get("pm_confidence_floor", 0.60))
-            if request.pm_confidence < floor:
+            # The floor tests the PM's ORIGINAL conviction. The Red Team's
+            # discount already prices its concerns through halved sizing
+            # (red_team_max_risk_pct); re-testing the discounted number
+            # against the same floor charged the same risk twice. Measured
+            # live 09-02: IREN 0.66 -> 0.51 was vetoed 0.01 below the
+            # tier-3 floor after every council stage had approved it.
+            conviction = (request.pm_conviction
+                          if request.pm_conviction is not None
+                          else request.pm_confidence)
+            if conviction < floor:
                 v.append(RiskViolation(
                     rule_id="RISK_PM_CONFIDENCE", severity=Severity.BLOCK,
-                    message=f"PM confidence {request.pm_confidence:.2f} below "
+                    message=f"PM conviction {conviction:.2f} below "
                             f"the tier floor {floor:.2f}",
-                    observed_value=request.pm_confidence, allowed_value=floor))
+                    observed_value=conviction, allowed_value=floor))
 
             score_floor = float(tier_cfg.get("final_score_floor", 68.0))
+            if str(request.candidate_track or "") == "EVENT":
+                score_floor = float(
+                    tier_cfg.get("final_score_floor_event", score_floor))
             if request.final_opportunity_score < score_floor:
                 v.append(RiskViolation(
                     rule_id="RISK_SCORE_FLOOR", severity=Severity.BLOCK,

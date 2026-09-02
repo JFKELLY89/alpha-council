@@ -469,3 +469,49 @@ def test_sector_mapping_defaults_to_unknown_bucket():
     assert sector_of("NVDA", sector_map) == "TECH"
     assert sector_of("SPY", sector_map) == "INDEX"
     assert sector_of("BTAI", sector_map) == "UNKNOWN"
+
+
+# ======================================================================
+# conviction vs. Red Team discount, and the event-track score bar
+# (both measured live 2026-09-02)
+# ======================================================================
+
+def test_confidence_floor_tests_original_conviction():
+    """A Red Team discount must not re-trip the floor that the original
+    conviction already cleared: the discount prices its concerns through
+    sizing (recommended_max_risk_pct). IREN died 0.01 below the floor on
+    09-02 after every council stage had approved the trade."""
+    ev = _rc().evaluate(
+        _request(pm_confidence=0.51, pm_conviction=0.66,
+                 red_team_verdict=Verdict.MODIFY, red_team_max_risk_pct=0.3),
+        _portfolio(), now=NOW)
+    assert "RISK_PM_CONFIDENCE" not in _rule_ids(ev)
+
+
+def test_confidence_floor_still_blocks_weak_conviction():
+    ev = _rc().evaluate(
+        _request(pm_confidence=0.51, pm_conviction=0.55),
+        _portfolio(), now=NOW)
+    assert "RISK_PM_CONFIDENCE" in _rule_ids(ev)
+
+
+def test_confidence_floor_falls_back_without_conviction():
+    ev = _rc().evaluate(_request(pm_confidence=0.51), _portfolio(), now=NOW)
+    assert "RISK_PM_CONFIDENCE" in _rule_ids(ev)
+
+
+def test_event_track_uses_event_score_floor():
+    rc = RiskConstitution(RISK_CFG, {
+        "tiers": {1: {"pm_confidence_floor": 0.60,
+                      "final_score_floor": 68.0,
+                      "final_score_floor_event": 66.0,
+                      "max_cost_to_width": 0.55}},
+        "liquidity_floor": SCORING_CFG["liquidity_floor"],
+    })
+    ev = rc.evaluate(_request(final_opportunity_score=66.5,
+                              candidate_track="EVENT"),
+                     _portfolio(), now=NOW)
+    assert "RISK_SCORE_FLOOR" not in _rule_ids(ev)
+    ev = rc.evaluate(_request(final_opportunity_score=66.5),
+                     _portfolio(), now=NOW)
+    assert "RISK_SCORE_FLOOR" in _rule_ids(ev)

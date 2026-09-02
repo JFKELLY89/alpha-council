@@ -329,6 +329,11 @@ class Orchestrator:
             desired_risk_pct=effective_risk_pct(council),
             pm_confidence=(council.final_proposal.confidence
                            if council.final_proposal else 0.0),
+            # Original rev-0 conviction: the floor tests this; the Red
+            # Team discount rides in via red_team_max_risk_pct below.
+            pm_conviction=(council.proposal.confidence
+                           if council.proposal else None),
+            candidate_track=str(candidate.track),
             red_team_verdict=(council.review.verdict if council.review
                               else Verdict.PASS),
             # Claude's cap applies only when Claude asked for a change; a
