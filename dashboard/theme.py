@@ -329,23 +329,52 @@ def inject_css(palette: Palette) -> None:
             color: {p.text};
         }}
 
-        /* ---- tabs: gold spine, pillar accents ----------------------
+        /* ---- tabs: distinct chips, pillar accents ------------------
            Streamlit 1.62 renders tabs as bare role="tab" divs with no
-           data-baseweb hooks; the ARIA roles are the stable surface. */
+           data-baseweb hooks; the ARIA roles are the stable surface.
+           Chips instead of a run-on text row: nine adjacent labels with
+           .25rem gaps read as one sentence, not as navigation. */
         .stTabs [role="tablist"] {{
+            gap: .5rem;
             border-bottom: 1px solid {p.border};
-            gap: .25rem;
+            padding-bottom: .55rem;
         }}
         .stTabs [role="tab"] {{
+            background: {p.card};
+            border: 1px solid {p.grid};
+            border-radius: .55rem;
+            padding: .34rem .9rem;
             color: {p.muted};
             letter-spacing: .03em;
+            transition: color .15s, border-color .15s;
         }}
-        .stTabs [role="tab"][aria-selected="true"] {{ color: {p.gold} !important; }}
+        .stTabs [role="tab"]:hover {{
+            color: {p.text};
+            border-color: {p.border};
+        }}
+        .stTabs [role="tab"][aria-selected="true"] {{
+            color: {p.gold} !important;
+            border-color: {p.gold};
+            background: {'rgba(212,175,55,0.10)' if p.name == 'dark'
+                         else 'rgba(156,122,31,0.10)'};
+            font-weight: 600;
+            box-shadow: 0 0 10px {'rgba(212,175,55,0.22)' if p.name == 'dark'
+                                  else 'rgba(156,122,31,0.15)'};
+        }}
+        /* the sliding underline is redundant under chips */
+        .stTabs [data-baseweb="tab-highlight"],
+        .stTabs [data-baseweb="tab-border"] {{ display: none; }}
         /* pillar tints: Council Decision blue, Gate Lab green,
            Alpha Evolution purple (fixed tab order) */
-        .stTabs [role="tab"]:nth-child(4)[aria-selected="true"] {{ color: {p.blue} !important; }}
-        .stTabs [role="tab"]:nth-child(6)[aria-selected="true"] {{ color: {p.green} !important; }}
-        .stTabs [role="tab"]:nth-child(8)[aria-selected="true"] {{ color: {p.purple} !important; }}
+        .stTabs [role="tab"]:nth-child(4)[aria-selected="true"] {{
+            color: {p.blue} !important; border-color: {p.blue};
+        }}
+        .stTabs [role="tab"]:nth-child(6)[aria-selected="true"] {{
+            color: {p.green} !important; border-color: {p.green};
+        }}
+        .stTabs [role="tab"]:nth-child(8)[aria-selected="true"] {{
+            color: {p.purple} !important; border-color: {p.purple};
+        }}
 
         /* ---- surfaces ---------------------------------------------- */
         [data-testid="stExpander"] {{
