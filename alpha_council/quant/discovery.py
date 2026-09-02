@@ -248,15 +248,16 @@ class DiscoveryService:
         candidates = self.universe.members(now)
         eligible = await self._filter_eligible(candidates)
 
-        # Screener symbols arrive mid-session with no stored history, so they
-        # would fail the Stage-0 sufficiency check and the breadth would be
-        # decorative. Backfill them before ranking. Capped per scan because a
-        # 200-symbol cold start would blow the request budget.
-        newcomers = [s for s in eligible if s not in self.universe.core_set]
-        if newcomers and self.backfill_limit > 0:
+        # EVERY eligible symbol goes through the staleness check — Core
+        # included. The old newcomers-only pass never refreshed Core bars
+        # intraday, so by mid-morning every Core candidate's RVOL numerator
+        # was empty, the score pinned at the neutral 40 fallback, and the
+        # PM abstained on "no volume confirmation" all day. The check
+        # itself is cheap (one COUNT per symbol); only genuinely stale
+        # symbols are fetched, batched and capped inside backfill_missing.
+        if eligible and self.backfill_limit > 0:
             self.last_backfill = await self.market.backfill_missing(
-                newcomers[: self.backfill_limit],
-                sessions=self.backfill_sessions,
+                eligible, sessions=self.backfill_sessions,
             )
 
         density = {s: (await self.market.bar_coverage(s))["bars"]

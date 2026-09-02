@@ -254,16 +254,28 @@ class MarketDataService:
                 await self._persist_bars(kept)
         return counts
 
+    # Bars older than this during a session are stale for the RVOL
+    # numerator: the current clock window has no volume in the store and
+    # rvol computes None, which the scorer treats as neutral-40 and the PM
+    # reads as "no volume confirmation".
+    INTRADAY_STALE_SECONDS = 1200.0
+
     async def backfill_missing(self, symbols: Sequence[str],
                                sessions: int = 20,
-                               min_bars: int | None = None) -> dict[str, int]:
-        """On-demand backfill for newly injected dynamic symbols.
+                               min_bars: int | None = None,
+                               max_fetch: int = 150) -> dict[str, int]:
+        """On-demand backfill for any symbol whose stored bars are stale.
 
-        Discovery admits symbols mid-session, so their history has to arrive
-        before they can be scored. Symbols already covered are skipped.
+        Covers two cases with one check: newly injected symbols with no
+        history at all, and ALREADY-COVERED symbols whose latest bar has
+        aged out intraday. The second case is the one that silently
+        neutralized RVOL for every Core symbol: a date-only staleness
+        check refreshed bars once at the first scan and then let the
+        numerator go empty for the rest of the session.
         """
         threshold = min_bars if min_bars is not None else int(
             RTH_BARS_PER_SESSION * sessions * 0.6)
+        now = utc_now()
         needed = []
         for sym in symbols:
             row = await self.db.fetchone(
@@ -276,17 +288,21 @@ class MarketDataService:
                 needed.append(sym)
                 continue
 
-            # Enough history is not the same as current history. A symbol
-            # backfilled on a previous day passes the count check and then
-            # returns a stale RVOL forever, because the numerator needs
-            # bars from the CURRENT session.
             last_ts = parse_alpaca_ts((row or {}).get("last_ts"))
             if last_ts is None:
                 needed.append(sym)
                 continue
-            if to_et(last_ts).date() < to_et(utc_now()).date():
+            if to_et(last_ts).date() < to_et(now).date():
                 needed.append(sym)
-        return await self.backfill_bars(needed, sessions) if needed else {}
+                continue
+            # Same-day but aged: the current session has moved on without
+            # the store. Only matters during RTH; after the close the last
+            # bar is legitimately the 15:55 bar.
+            if is_rth(now) and (now - last_ts).total_seconds() \
+                    > self.INTRADAY_STALE_SECONDS:
+                needed.append(sym)
+        return (await self.backfill_bars(needed[:max_fetch], sessions)
+                if needed else {})
 
     async def _persist_bars(self, bars: Sequence[Bar]) -> None:
         await self.db.executemany(

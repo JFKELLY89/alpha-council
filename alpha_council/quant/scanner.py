@@ -241,7 +241,8 @@ class FunnelScanner:
                 c.novelty_score or 0.0, c.data_confidence_factor,
                 c.regime_factor, c.event_risk_factor, c.pre_score,
                 c.raw_opportunity_score, c.final_opportunity_score,
-                "{}", iso_utc(), str(c.discovery_source), str(c.track),
+                json.dumps(c.key_metrics, default=str), iso_utc(),
+                str(c.discovery_source), str(c.track),
                 c.fast_score,
             ))
         await self.db.executemany(

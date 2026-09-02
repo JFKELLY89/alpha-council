@@ -271,11 +271,28 @@ def build_candidate(stage0: Stage0Result, intel: IntelSummary,
         final_opportunity_score=final,
         tier=tier, config_version=config_version,
         key_metrics={
-            "rvol": stage0.metrics.get("rvol") or 0.0,
+            # None stays None: coercing an unknown RVOL to 0.0 told the PM
+            # "zero volume" when the truth was "not measurable", and the PM
+            # abstained on it — the same fabricated-neutral failure the
+            # catalyst rules exist to prevent.
+            "rvol": stage0.metrics.get("rvol"),
             "rs15": stage0.metrics.get("rs15") or 0.0,
             "rs60": stage0.metrics.get("rs60") or 0.0,
             "intel_events": intel.event_count,
             "data_gaps": stage0.metrics.get("data_gaps") or 0,
+            # Real price levels, so an invalidation rule has something to
+            # anchor on. "No breakout, support, or retest evidence" was a
+            # literal description of the package, not of the market.
+            "last_price": round(stage0.indicators.last_price, 4),
+            "vwap": (round(stage0.indicators.vwap, 4)
+                     if stage0.indicators.vwap else None),
+            "ema9": (round(stage0.indicators.ema9, 4)
+                     if stage0.indicators.ema9 else None),
+            "ema20": (round(stage0.indicators.ema20, 4)
+                      if stage0.indicators.ema20 else None),
+            "day_open": (round(stage0.indicators.day_open, 4)
+                         if stage0.indicators.day_open else None),
+            "day_return_pct": round(stage0.indicators.r_day * 100, 3),
         },
     )
 
