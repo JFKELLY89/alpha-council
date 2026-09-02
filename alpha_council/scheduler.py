@@ -304,12 +304,23 @@ class TradingSession:
                 councils_started += 1
 
                 self.summary.candidates_evaluated += 1
+                # The PM's most common abstain reason was "no underlying
+                # price level to anchor an invalidation on" - because the
+                # evidence carried scores but never the price itself.
+                spot = structures[0].underlying_price
                 builder = EvidenceBuilder(
                     candidate=candidate,
                     intel_events=raw_events.get(candidate.symbol, []),
                     structures=structures,
                     portfolio_state=self._portfolio_summary(portfolio),
-                    market_summary={"tier": self.tiers.tier},
+                    market_summary={
+                        "tier": self.tiers.tier,
+                        "underlying_price": spot,
+                        "note": ("underlying_price is the live spot at "
+                                 "scan time; structure breakevens and "
+                                 "strikes below are real, current levels "
+                                 "usable for invalidation rules."),
+                    },
                     scheduled_events=[],
                     session_briefing=self.session_briefing)
 

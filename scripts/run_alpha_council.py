@@ -54,6 +54,8 @@ from alpha_council.db.config_store import ensure_config_version  # noqa: E402
 from alpha_council.db.engine import Database  # noqa: E402
 from alpha_council.evolution.champion import ChampionRegistry  # noqa: E402
 from alpha_council.evolution.lessons import LessonGenerator  # noqa: E402
+from alpha_council.evolution.payoffs import PayoffEngine  # noqa: E402
+from alpha_council.evolution.scenarios import ScenarioGenerator  # noqa: E402
 from alpha_council.evolution.service import EvolutionService  # noqa: E402
 from alpha_council.evolution.shadow_runner import ShadowRunner  # noqa: E402
 from alpha_council.execution.order_manager import OrderManager  # noqa: E402
@@ -182,8 +184,17 @@ async def run(args: argparse.Namespace) -> int:
         anthropic_client = AnthropicClient(
             db, budget, scoring,
             settings.anthropic_api_key.get_secret_value())
-        council = Council(openai_client, anthropic_client, scoring)
+        # The ScenarioGenerator was built and tested but never passed here,
+        # so the autonomous council ran without scenario payoff tables and
+        # the PM abstained every time on "no defensible invalidation
+        # level" - the exact objection scenarios exist to answer. Found
+        # live 2026-09-02 after three identical abstains in one scan.
+        scenario_generator = ScenarioGenerator(
+            openai_client, PayoffEngine(db), db, scoring)
+        council = Council(openai_client, anthropic_client, scoring,
+                          scenarios=scenario_generator)
         say(f"  budget           : {budget.summary()}")
+        say("  scenario gen     : wired (payoff tables reach PM and Red Team)")
 
         # ---- risk, execution, journal ---------------------------------
         constitution = RiskConstitution(risk_cfg, scoring,
