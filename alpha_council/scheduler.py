@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +34,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from alpha_council.agents.evidence import EvidenceBuilder
 from alpha_council.db.engine import Database
 from alpha_council.intelligence.news import NewsIntelligence
+from alpha_council.models.candidate import CandidateFeatures
 from alpha_council.journal.trade_journal import RejectionLog
 from alpha_council.quant.scoring import IntelSummary, summarize_intel
 from alpha_council.models.enums import DataConfidence, ExitReason
@@ -236,6 +237,68 @@ class TradingSession:
         used = int((row or {}).get("n") or 0)
         return max(0, cap - used)
 
+    async def _allocate_council_seats(
+            self, finalists: Sequence[CandidateFeatures],
+            max_councils: int) -> list[CandidateFeatures]:
+        """Choose which finalists get council seats, not just the top N.
+
+        Two live 09-02 findings: nine seats went to symbols that had
+        already PM-abstained the same day on unchanged evidence, and in
+        the 15:00Z scan every seat went to catalyst-less MOMENTUM
+        candidates while the only EVENT candidate ranked 4th, unheard.
+        Score order stays primary; this skips deterministic re-runs and
+        guarantees the top EVENT finalist one seat when one exists.
+        """
+        if max_councils <= 0 or not finalists:
+            return []
+        cfg = self.config.get("council_seats", {})
+        cooldown_h = float(cfg.get("abstain_cooldown_hours", 2.0))
+        rescore = float(cfg.get("abstain_rescore_delta", 4.0))
+
+        eligible: list[CandidateFeatures] = []
+        for candidate in finalists:
+            recent = None
+            if cooldown_h > 0:
+                cutoff = (utc_now()
+                          - timedelta(hours=cooldown_h)).isoformat()
+                recent = await self.db.fetchone(
+                    "SELECT p.created_at, s.final_opportunity_score AS score "
+                    "FROM trade_proposals p "
+                    "JOIN decisions d ON d.decision_id = p.decision_id "
+                    "LEFT JOIN candidate_scores s "
+                    "  ON s.candidate_id = d.candidate_id "
+                    "WHERE d.symbol = ? AND p.trade = 0 "
+                    "  AND p.created_at >= ? "
+                    "ORDER BY p.created_at DESC LIMIT 1",
+                    (candidate.symbol, cutoff))
+            if recent is not None:
+                then = recent.get("score")
+                unchanged = (then is not None
+                             and abs(candidate.final_opportunity_score
+                                     - float(then)) < rescore)
+                if unchanged:
+                    await self.log(
+                        "INFO", "COUNCIL_SKIP_RECENT_ABSTAIN",
+                        f"{candidate.symbol}: abstained at "
+                        f"{recent['created_at'][:16]}Z on materially "
+                        "unchanged evidence; seat passes on")
+                    continue
+            eligible.append(candidate)
+
+        seats = list(eligible[:max_councils])
+        if cfg.get("reserve_event_seat", True) and seats:
+            if not any(str(c.track) == "EVENT" for c in seats):
+                top_event = next((c for c in eligible
+                                  if str(c.track) == "EVENT"), None)
+                if top_event is not None:
+                    await self.log(
+                        "INFO", "COUNCIL_EVENT_SEAT_RESERVED",
+                        f"{top_event.symbol} takes the last seat over "
+                        f"{seats[-1].symbol}: a real catalyst outranks "
+                        "a marginal momentum seat")
+                    seats[-1] = top_event
+        return seats
+
     async def full_scan(self) -> None:
         """One complete funnel pass, then councils on the survivors."""
         if self._scan_lock.locked():
@@ -301,7 +364,9 @@ class TradingSession:
                                "no councils started")
 
             councils_started = 0
-            for candidate in result.final[:max_councils]:
+            seats = await self._allocate_council_seats(result.final,
+                                                       max_councils)
+            for candidate in seats:
                 structures = result.structures_for(candidate.symbol)
                 if not structures:
                     continue
