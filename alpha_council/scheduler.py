@@ -225,8 +225,12 @@ class TradingSession:
         cap = int(self.tiers.tier_config().get("max_councils_per_day", 12))
         day_start_et = to_et(utc_now()).replace(hour=0, minute=0, second=0,
                                                 microsecond=0)
+        # Calibration lifecycles are plumbing trades: no analysts, no PM,
+        # no Red Team. They must not consume the LLM-spend budget this
+        # cap exists to protect.
         row = await self.db.fetchone(
-            "SELECT COUNT(*) AS n FROM decisions WHERE created_at >= ?",
+            "SELECT COUNT(*) AS n FROM decisions WHERE created_at >= ? "
+            "AND COALESCE(candidate_track, '') != 'CALIBRATION'",
             (day_start_et.astimezone(timezone.utc).isoformat(
                 timespec="microseconds"),))
         used = int((row or {}).get("n") or 0)

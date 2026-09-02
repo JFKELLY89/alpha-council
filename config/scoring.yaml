@@ -125,7 +125,7 @@ tiers:
     max_leg_spread_pct: 0.20
     dte: [5, 30]
     max_councils_per_scan: 3
-    max_councils_per_day: 16
+    max_councils_per_day: 30
 
   3:
     # v2.4: Tier 3 relaxes SCORE and CONFIDENCE, not liquidity.
@@ -145,7 +145,7 @@ tiers:
     max_leg_spread_pct: 0.22
     dte: [5, 30]
     max_councils_per_scan: 4
-    max_councils_per_day: 18
+    max_councils_per_day: 30
 
 # Hard floor beneath every tier. The ladder may not go below these.
 liquidity_floor:
