@@ -106,7 +106,9 @@ tiers:
     min_open_interest: 250
     min_volume: 25
     max_leg_spread_pct: 0.15
-    dte: [7, 21]
+    dte: [7, 28]                  # 21 stranded 10-trading-day theses: the
+                                  # only surviving EOSE pair expired at DTE 9
+                                  # and the PM had nothing spanning its horizon
     max_councils_per_scan: 3
     max_councils_per_day: 30
 
@@ -153,6 +155,17 @@ liquidity_floor:
   min_volume: 5
   max_leg_spread_pct: 0.22
   min_dte: 3
+
+# ----------------------------------------------------------------------
+# council seat allocation (v2.5 live-patch 09-02)
+# The morning burned nine council seats on symbols that had already
+# PM-abstained on unchanged evidence, while the only catalyst-bearing
+# EVENT candidate ranked 4th and was never heard.
+# ----------------------------------------------------------------------
+council_seats:
+  reserve_event_seat: true        # top EVENT finalist always gets a seat
+  abstain_cooldown_hours: 2.0     # skip re-council after a recent abstain...
+  abstain_rescore_delta: 4.0      # ...unless final score moved this much
 
 # Reward/risk is DERIVED, never asserted: RR = (1 - c/w) / (c/w).
 # Tier 1 max_cost_to_width 0.55 implies RR >= 0.82.
@@ -365,7 +378,10 @@ model_prices:                      # USD per million tokens
   claude-sonnet-5: {input: 2.00, output: 10.00}
 
 budget:
-  per_session_ceiling_usd: 0.75
+  per_session_ceiling_usd: 6.00  # 0.75 strangled the 15:20 councils mid-PM
+                                 # after one long-lived session; the runaway-
+                                 # loop guard still binds well under the
+                                 # daily provider ceiling
   daily_provider_ceiling_usd: 8.00
   openai_total_usd: 50.00
   anthropic_total_usd: 50.00
