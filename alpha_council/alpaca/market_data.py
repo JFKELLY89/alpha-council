@@ -379,28 +379,38 @@ class MarketDataService:
             return None
 
         today = to_et(now).date()
-        current = 0.0
-        historical: dict[date, float] = {}
 
-        for b in bars:
-            et = to_et(b.timestamp)
-            if clock_window_index(b.timestamp, window_minutes) != window:
-                continue
-            if et.date() == today:
-                current += b.volume
-            else:
-                historical[et.date()] = historical.get(et.date(), 0.0) + b.volume
+        def ratio_for(idx: int) -> float | None:
+            current = 0.0
+            historical: dict[date, float] = {}
+            for b in bars:
+                if clock_window_index(b.timestamp, window_minutes) != idx:
+                    continue
+                et = to_et(b.timestamp)
+                if et.date() == today:
+                    current += b.volume
+                else:
+                    historical[et.date()] = historical.get(et.date(), 0.0) \
+                        + b.volume
+            if current <= 0 or len(historical) < 5:
+                return None
+            by_date = [volume for _, volume in sorted(historical.items())]
+            baseline = median_or_none(by_date[-lookback_sessions:])
+            if not baseline or baseline <= 0:
+                return None
+            return current / baseline
 
-        if current <= 0 or len(historical) < 5:
-            return None
-        # Most recent N sessions, ordered by date. The previous
-        # constant-key sort happened to preserve insertion order but read
-        # as a no-op and depended on it silently.
-        by_date = [volume for _, volume in sorted(historical.items())]
-        baseline = median_or_none(by_date[-lookback_sessions:])
-        if not baseline or baseline <= 0:
-            return None
-        return current / baseline
+        # The scheduler scans at :00/:15/:45 — the exact moments a fresh
+        # clock window opens with no bars in it yet, which returned None at
+        # nearly every scan of the day (measured live 2026-09-02: every
+        # candidate at the neutral fallback). When the current window is
+        # still empty, use the previous COMPLETED window; numerator and
+        # denominator share the index either way, so the same-clock
+        # comparison the spec requires stays intact.
+        result = ratio_for(window)
+        if result is None and window > 0:
+            result = ratio_for(window - 1)
+        return result
 
     async def session_volume_profile(self, symbol: str,
                                      window_minutes: int = 15,

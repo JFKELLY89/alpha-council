@@ -394,3 +394,33 @@ async def test_oi_gate_stands_down_when_source_unavailable():
         ChainFilters(min_open_interest=250), NOW, result, oi_map=None)
     assert leg is not None
     assert leg.open_interest is None
+
+
+# ======================================================================
+# 9. Anthropic schema compatibility (found on the first live Red Team
+#    call: output_config 400s on integer minimum/maximum)
+# ======================================================================
+
+def test_anthropic_safe_schema_strips_range_constraints():
+    from alpha_council.agents.llm import anthropic_safe_schema
+    from alpha_council.models.trading import RedTeamReview
+
+    raw = RedTeamReview.model_json_schema()
+    assert "minimum" in json.dumps(raw)        # ge=1/le=10 fields exist
+
+    safe = anthropic_safe_schema(raw)
+    dumped = json.dumps(safe)
+    for banned in ("minimum", "maximum", "exclusiveMinimum",
+                   "exclusiveMaximum", "multipleOf"):
+        assert banned not in dumped
+    # The original is untouched and client-side validation still binds.
+    assert "minimum" in json.dumps(raw)
+    with pytest.raises(Exception):
+        RedTeamReview.model_validate({"decision_id": "d", "verdict": "PASS",
+                                      "risk_score": 99, "fatal_flaw": False,
+                                      "confidence_adjustment": 0.0,
+                                      "recommended_max_risk_pct": 1.0,
+                                      "problems": [],
+                                      "strongest_counterargument": "x",
+                                      "information_to_reverse_verdict": [],
+                                      "summary": "s"})

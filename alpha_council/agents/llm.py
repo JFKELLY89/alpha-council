@@ -314,6 +314,35 @@ class OpenAIClient(LLMClient):
 # Anthropic
 # ======================================================================
 
+def anthropic_safe_schema(schema: dict) -> dict:
+    """Strip constraint keywords Anthropic's output_config rejects.
+
+    Measured live 2026-09-02 (the first Red Team call ever made): the API
+    400s on integer `minimum`/`maximum` — which every Field(ge=..., le=...)
+    emits. The constraints still bind, because parse_structured validates
+    the response through the full Pydantic model on our side; this only
+    changes what the SERVER is asked to enforce.
+    """
+    import copy
+
+    banned = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+              "multipleOf"}
+
+    def scrub(node):
+        if isinstance(node, dict):
+            for key in banned & set(node):
+                node.pop(key)
+            for value in node.values():
+                scrub(value)
+        elif isinstance(node, list):
+            for value in node:
+                scrub(value)
+
+    out = copy.deepcopy(schema)
+    scrub(out)
+    return out
+
+
 class AnthropicClient(LLMClient):
     provider = "anthropic"
 
@@ -346,7 +375,8 @@ class AnthropicClient(LLMClient):
         if "output_config" not in omit:
             kwargs["output_config"] = {
                 "format": {"type": "json_schema",
-                           "schema": schema.model_json_schema()}}
+                           "schema": anthropic_safe_schema(
+                               schema.model_json_schema())}}
         if "effort" not in omit and settings.get("effort"):
             kwargs["effort"] = settings["effort"]
 
