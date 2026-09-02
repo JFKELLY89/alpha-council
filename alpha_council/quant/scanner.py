@@ -198,9 +198,12 @@ class FunnelScanner:
 
         # ---- stage 3: final ranking -------------------------------
         final_floor = float(tier_cfg.get("final_score_floor", 68.0))
+        event_floor = float(
+            tier_cfg.get("final_score_floor_event", final_floor))
         tracks_cfg = self.config.get("tracks", {})
         ranked = rank_by_track(
-            result.prescreened, final_floor,
+            result.prescreened,
+            {"MOMENTUM": final_floor, "EVENT": event_floor},
             total=int(disc_cfg.get("final_candidate_top_n", 5)),
             quota=tracks_cfg.get("final_quota", {"EVENT": 3, "MOMENTUM": 2}),
             backfill=bool(tracks_cfg.get("backfill_across_tracks", True)),

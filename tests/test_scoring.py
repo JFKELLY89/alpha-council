@@ -310,3 +310,15 @@ def test_backfill_can_be_disabled():
                            backfill=False)
     assert len(ranked.selected) == 2
     assert ranked.backfilled == 0
+
+
+def test_event_floor_prices_each_track_separately():
+    """A shared final floor structurally penalizes EVENT candidates,
+    whose score carries the catalyst drag MOMENTUM scoring omits."""
+    ranked = rank_by_track(
+        [_cand("EV", 60.5, CandidateTrack.EVENT),
+         _cand("MO", 60.5, CandidateTrack.MOMENTUM)],
+        score_floor={"MOMENTUM": 62.0, "EVENT": 60.0}, total=5)
+    assert [c.symbol for c in ranked.selected] == ["EV"]
+    assert any(r[0] == "MO" and r[1] == "FINAL_SCORE_FLOOR"
+               for r in ranked.rejected)

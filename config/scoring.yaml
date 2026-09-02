@@ -96,7 +96,12 @@ tiers:
     # quality opinion, not a safety limit.
     pre_score_floor: 58.0
     final_score_floor: 62.0
-    pm_confidence_floor: 0.60
+    final_score_floor_event: 60.0  # EVENT scores carry the catalyst drag
+                                   # MOMENTUM omits; CRDO missed the shared
+                                   # bar by 0.9-1.0 twice on 09-02
+    pm_confidence_floor: 0.60      # tests the PM's ORIGINAL conviction;
+                                   # the Red Team discount drives sizing,
+                                   # not a second floor test
     direction_ambiguity_floor: 0.15
     max_cost_to_width: 0.55
     long_delta: [0.52, 0.72]
@@ -115,6 +120,7 @@ tiers:
   2:
     pre_score_floor: 56.0
     final_score_floor: 62.0
+    final_score_floor_event: 60.0
     pm_confidence_floor: 0.55
     direction_ambiguity_floor: 0.15
     max_cost_to_width: 0.60
@@ -135,6 +141,7 @@ tiers:
     # anti-zero-trade mechanism into a licence to trade illiquid garbage.
     pre_score_floor: 52.0
     final_score_floor: 58.0
+    final_score_floor_event: 56.0
     pm_confidence_floor: 0.52
     direction_ambiguity_floor: 0.15
     max_cost_to_width: 0.62

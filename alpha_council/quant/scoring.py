@@ -315,7 +315,7 @@ class RankedSet:
 
 
 def rank_by_track(candidates: Sequence[CandidateFeatures],
-                  score_floor: float, total: int = 5,
+                  score_floor: float | dict[str, float], total: int = 5,
                   quota: dict[str, int] | None = None,
                   backfill: bool = True,
                   score_attr: str = "final_opportunity_score") -> RankedSet:
@@ -324,19 +324,36 @@ def rank_by_track(candidates: Sequence[CandidateFeatures],
     Default quota is 3 EVENT / 2 MOMENTUM. Unfilled slots in either track
     are backfilled from the other, so a session with no fresh news still
     produces a full candidate set.
+
+    score_floor may be a per-track mapping ({"EVENT": 60, "MOMENTUM": 62}).
+    A shared bar structurally penalizes EVENT candidates: their score
+    carries the ~50-neutral catalyst drag that MOMENTUM scoring omits
+    (see the tracks section of scoring.yaml). Measured live 09-02: CRDO
+    missed the shared bar by 0.9 and 1.0 in consecutive scans while
+    catalyst-less MOMENTUM names filled every seat.
     """
     q = quota or {"EVENT": 3, "MOMENTUM": 2}
     result = RankedSet()
+
+    if isinstance(score_floor, dict):
+        base_floor = float(score_floor.get("MOMENTUM", 68.0))
+        floors = {CandidateTrack.EVENT:
+                  float(score_floor.get("EVENT", base_floor)),
+                  CandidateTrack.MOMENTUM: base_floor}
+    else:
+        floors = {CandidateTrack.EVENT: float(score_floor),
+                  CandidateTrack.MOMENTUM: float(score_floor)}
 
     eligible: dict[CandidateTrack, list[CandidateFeatures]] = {
         CandidateTrack.EVENT: [], CandidateTrack.MOMENTUM: []}
 
     for c in candidates:
         score = getattr(c, score_attr)
-        if score < score_floor:
+        track_floor = floors.get(c.track, max(floors.values()))
+        if score < track_floor:
             result.rejected.append(
                 (c.symbol, "FINAL_SCORE_FLOOR",
-                 f"{score:.1f} < {score_floor:.1f} ({c.track})"))
+                 f"{score:.1f} < {track_floor:.1f} ({c.track})"))
             continue
         if c.track in eligible:
             eligible[c.track].append(c)

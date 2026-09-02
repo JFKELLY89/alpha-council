@@ -158,6 +158,7 @@ class ShadowRunner:
                             if k in pre_w}, pre_w)
 
         tier1 = config.get("tiers", {}).get(1, {})
+        base_floor = float(tier1.get("final_score_floor", 62.0))
         return {
             "candidate_id": row["candidate_id"],
             "decision_id": row.get("decision_id"),
@@ -166,7 +167,9 @@ class ShadowRunner:
             "pre": pre,
             "final": final,
             "champion_final": row["final_opportunity_score"],
-            "floor": float(tier1.get("final_score_floor", 62.0)),
+            # Mirrors rank_by_track: EVENT prices against its own bar.
+            "floor": (float(tier1.get("final_score_floor_event", base_floor))
+                      if str(track) == "EVENT" else base_floor),
             "pre_floor": float(tier1.get("pre_score_floor", 58.0)),
         }
 
