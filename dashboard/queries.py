@@ -1099,3 +1099,151 @@ def get_decision_api_usage(
     return _read_frame(
         database_path, _DECISION_API_USAGE_SQL, {"decision_id": decision_id}
     )
+
+
+# ---------------------------------------------------------------------------
+# Alpha Evolution (v2.5)
+# ---------------------------------------------------------------------------
+
+_STRATEGY_VERSIONS_SQL = """
+SELECT
+    strategy_id,
+    parent_strategy_id,
+    status,
+    created_at,
+    promoted_at,
+    retired_at,
+    config_version,
+    hypothesis,
+    operator_approved
+FROM strategy_versions
+ORDER BY created_at
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_strategy_versions(database_path: str | Path) -> pd.DataFrame:
+    return _read_frame(database_path, _STRATEGY_VERSIONS_SQL)
+
+
+_CHALLENGER_PROPOSALS_SQL = """
+SELECT
+    challenger_id,
+    parent_champion_id,
+    created_at,
+    hypothesis,
+    changes_json,
+    expected_benefit,
+    expected_failure_mode,
+    minimum_shadow_observations,
+    confidence,
+    status
+FROM challenger_proposals
+ORDER BY created_at DESC
+LIMIT :limit
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_challenger_proposals(
+    database_path: str | Path, limit: int = 10
+) -> pd.DataFrame:
+    return _read_frame(database_path, _CHALLENGER_PROPOSALS_SQL,
+                       {"limit": limit})
+
+
+_STRATEGY_PERFORMANCE_SQL = """
+SELECT p.*
+FROM strategy_performance_snapshots AS p
+JOIN (
+    SELECT strategy_id, MAX(as_of) AS latest
+    FROM strategy_performance_snapshots
+    GROUP BY strategy_id
+) AS latest_snapshot
+  ON latest_snapshot.strategy_id = p.strategy_id
+ AND latest_snapshot.latest = p.as_of
+ORDER BY p.strategy_id
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_strategy_performance(database_path: str | Path) -> pd.DataFrame:
+    return _read_frame(database_path, _STRATEGY_PERFORMANCE_SQL)
+
+
+_PROMOTION_RECOMMENDATIONS_SQL = """
+SELECT
+    generated_at,
+    champion_id,
+    challenger_id,
+    recommendation,
+    evidence_strength,
+    reasons_json,
+    failed_rules_json,
+    operator_approval_required,
+    approved_by_operator
+FROM promotion_recommendations
+ORDER BY generated_at DESC
+LIMIT :limit
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_promotion_recommendations(
+    database_path: str | Path, limit: int = 5
+) -> pd.DataFrame:
+    return _read_frame(database_path, _PROMOTION_RECOMMENDATIONS_SQL,
+                       {"limit": limit})
+
+
+_SHADOW_DECISION_SUMMARY_SQL = """
+SELECT
+    strategy_id,
+    COUNT(*) AS observations,
+    SUM(would_trade) AS would_trade,
+    COUNT(*) - SUM(would_trade) AS would_pass,
+    COUNT(DISTINCT substr(evaluated_at, 1, 10)) AS sessions
+FROM strategy_shadow_decisions
+GROUP BY strategy_id
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_shadow_decision_summary(database_path: str | Path) -> pd.DataFrame:
+    return _read_frame(database_path, _SHADOW_DECISION_SUMMARY_SQL)
+
+
+_STRATEGY_LESSONS_SQL = """
+SELECT
+    created_at,
+    lesson_type,
+    confidence,
+    sample_size,
+    observation,
+    explanation_hypothesis,
+    proposed_test,
+    recommends_change
+FROM strategy_lessons
+ORDER BY created_at DESC
+LIMIT :limit
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_strategy_lessons(
+    database_path: str | Path, limit: int = 12
+) -> pd.DataFrame:
+    return _read_frame(database_path, _STRATEGY_LESSONS_SQL, {"limit": limit})
+
+
+_PREMARKET_BRIEF_SQL = """
+SELECT session_date, generated_at, model, output_json, cost_usd
+FROM premarket_briefs
+ORDER BY session_date DESC
+LIMIT 1
+"""
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_latest_premarket_brief(database_path: str | Path) -> pd.DataFrame:
+    return _read_frame(database_path, _PREMARKET_BRIEF_SQL)

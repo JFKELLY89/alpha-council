@@ -31,6 +31,11 @@ class SizingResult:
     red_team_cap_dollars: float | None
     binding_cap: str
     max_loss_per_spread: float
+    # The binding cap in dollars, BEFORE flooring to whole spreads. The
+    # limit walk's per-spread price ceiling is budget/qty: floor()
+    # leaves headroom above max_loss_per_spread, and without it the walk's
+    # risk ceiling equals its first price and attempts 2 and 3 never exist.
+    budget_dollars: float = 0.0
 
     @property
     def was_resized(self) -> bool:
@@ -74,10 +79,10 @@ def size_position(equity: float, desired_risk_pct: float,
 
     requested_qty = int(math.floor(requested_dollars / max_loss_per_spread))
     approved_qty = int(math.floor(budget / max_loss_per_spread))
-    if max_qty is not None:
-        if approved_qty > max_qty:
-            approved_qty, binding = max_qty, "operator_max_qty"
-        requested_qty = min(requested_qty, max(requested_qty, max_qty))
+    if max_qty is not None and approved_qty > max_qty:
+        approved_qty, binding = max_qty, "operator_max_qty"
+    # requested_qty stays exactly what the PM's percentage implies: the
+    # attribution decomposition depends on it being unclamped.
 
     approved_qty = max(0, min(approved_qty, requested_qty))
 
@@ -91,7 +96,17 @@ def size_position(equity: float, desired_risk_pct: float,
                               if red_team_dollars is not None else None),
         binding_cap=binding,
         max_loss_per_spread=max_loss_per_spread,
+        budget_dollars=round(budget, 2),
     )
+
+
+def portfolio_risk_room(equity: float, current_open_risk: float,
+                        total_limit_pct: float, current_sector_risk: float,
+                        sector_limit_pct: float) -> float:
+    """Dollars of risk room under the total and sector caps, floored at 0."""
+    total_room = equity * total_limit_pct / 100.0 - current_open_risk
+    sector_room = equity * sector_limit_pct / 100.0 - current_sector_risk
+    return max(0.0, min(total_room, sector_room))
 
 
 def max_qty_under_portfolio_limits(equity: float, max_loss_per_spread: float,
@@ -100,9 +115,8 @@ def max_qty_under_portfolio_limits(equity: float, max_loss_per_spread: float,
                                    current_sector_risk: float,
                                    sector_limit_pct: float) -> int:
     """Largest quantity that keeps both portfolio caps satisfied."""
-    total_room = equity * total_limit_pct / 100.0 - current_open_risk
-    sector_room = equity * sector_limit_pct / 100.0 - current_sector_risk
-    room = min(total_room, sector_room)
+    room = portfolio_risk_room(equity, current_open_risk, total_limit_pct,
+                               current_sector_risk, sector_limit_pct)
     if room <= 0:
         return 0
     return int(math.floor(room / max_loss_per_spread))

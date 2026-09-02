@@ -67,12 +67,24 @@ class ExecutionCalibration(StrictModel):
 
     @model_validator(mode="after")
     def _limit_never_exceeds_natural(self) -> "ExecutionCalibration":
-        if self.final_submitted_limit > self.natural_debit_estimate + 1e-9:
-            raise ValueError(
-                f"submitted limit {self.final_submitted_limit} exceeds natural "
-                f"debit {self.natural_debit_estimate}; the limit walk must stop "
-                "at natural"
-            )
+        """Opening debits walk UP toward natural and must stop there.
+
+        Closing credits walk DOWN toward the conservative floor, so the
+        inequality inverts and is enforced by the close-walk ladder itself;
+        here the closing constraint is only that the final credit demanded
+        never fell below that floor.
+        """
+        if self.side is OrderSide.OPEN:
+            if self.final_submitted_limit > self.natural_debit_estimate + 1e-9:
+                raise ValueError(
+                    f"submitted limit {self.final_submitted_limit} exceeds "
+                    f"natural debit {self.natural_debit_estimate}; the limit "
+                    "walk must stop at natural")
+        else:
+            if self.final_submitted_limit < self.natural_debit_estimate - 1e-9:
+                raise ValueError(
+                    f"closing credit {self.final_submitted_limit} fell below "
+                    f"the conservative floor {self.natural_debit_estimate}")
         return self
 
     @model_validator(mode="after")
@@ -104,15 +116,14 @@ class ExecutionCalibration(StrictModel):
 
     @property
     def is_usable_for_learning(self) -> bool:
-        """Never learn from a stale quote or an unfilled order."""
-        return (
-            self.actual_fill_debit is not None
-            and self.quote_lag_seconds <= 900
-            and self.candidate_track is not CandidateTrack.CALIBRATION
-            or (self.actual_fill_debit is not None
-                and self.quote_lag_seconds <= 900
-                and self.candidate_track is CandidateTrack.CALIBRATION)
-        )
+        """Never learn from a stale quote or an unfilled order.
+
+        Calibration-track fills count too — measuring the indicated-to-fill
+        bias is exactly what they exist for. (The previous and/or chain
+        reduced to this expression; it is now written as what it means.)
+        """
+        return (self.actual_fill_debit is not None
+                and self.quote_lag_seconds <= 900)
 
     @property
     def underlying_drift_during_order(self) -> float:

@@ -13,6 +13,7 @@ Place at: alpha_council/quant/scanner.py
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
@@ -266,7 +267,7 @@ class FunnelScanner:
              snapshot.prescore_survivors, snapshot.options_prescreened,
              snapshot.final_candidates, snapshot.councils_started,
              snapshot.event_track_count, snapshot.momentum_track_count,
-             str(snapshot.source_counts).replace("'", '"')))
+             json.dumps(snapshot.source_counts)))
 
         if result.rejections:
             await self.db.executemany(

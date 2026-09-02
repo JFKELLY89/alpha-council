@@ -242,7 +242,18 @@ class ScenarioGenerator:
                 ok=False, cost_usd=result.cost_usd,
                 error=result.error or "no valid scenario set")
 
-        scenarios = result.parsed
+        # Identity and reference fields are OURS, not the model's. The
+        # schema forces the model to emit them, but a model echoing the
+        # same scenario_set_id twice would silently overwrite another
+        # decision's row, and its idea of spot skews every breakeven
+        # calculation downstream.
+        scenarios = result.parsed.model_copy(update={
+            "scenario_set_id": f"scn_{new_uuid()[:10]}",
+            "decision_id": decision_id,
+            "symbol": candidate.symbol,
+            "spot_at_generation": spot,
+            "generated_at": utc_now(),
+        })
         problems = sanity_check(scenarios, spot, candidate.direction)
         if problems:
             # A malformed scenario set is worse than none: it would feed

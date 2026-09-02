@@ -313,12 +313,26 @@ def test_liquidity_floor_is_below_every_tier():
 # ======================================================================
 
 def test_resize_oversized_trade():
+    """Claude's cap resizes only when Claude asked for a change (MODIFY)."""
     ev = _rc().evaluate(_request(desired_risk_pct=2.0,
+                                 red_team_verdict=Verdict.MODIFY,
                                  red_team_max_risk_pct=0.9),
                         _portfolio(), now=NOW)
     assert ev.decision is RiskDecision.RESIZE
     assert ev.approved_qty < ev.requested_qty
     assert ev.approved_qty >= 1
+
+
+def test_pass_verdict_cap_is_ignored():
+    """On PASS the recommendation is context, not a constraint: no shadow
+    variant exists for it, so honouring it would produce a size change the
+    attribution decomposition cannot assign to anyone."""
+    ev = _rc().evaluate(_request(desired_risk_pct=1.25,
+                                 red_team_verdict=Verdict.PASS,
+                                 red_team_max_risk_pct=0.5),
+                        _portfolio(), now=NOW)
+    assert ev.decision is RiskDecision.APPROVE
+    assert ev.approved_qty == ev.requested_qty
 
 
 def test_hard_cap_binds_above_two_percent():

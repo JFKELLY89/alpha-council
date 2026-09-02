@@ -21,6 +21,7 @@ from dashboard.tabs import (
     council,
     counterfactual,
     discovery,
+    evolution,
     execution_quality,
     gate_lab,
     scanner,
@@ -79,6 +80,7 @@ def main() -> None:
         "Counterfactual Lab",
         "Gate Lab",
         "Execution Quality",
+        "Alpha Evolution",
         "Audit",
     ]
     renderers = [
@@ -89,6 +91,7 @@ def main() -> None:
         counterfactual.render,
         gate_lab.render,
         execution_quality.render,
+        evolution.render,
         audit.render,
     ]
 

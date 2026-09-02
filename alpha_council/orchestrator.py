@@ -25,7 +25,7 @@ Place at: alpha_council/orchestrator.py
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -216,7 +216,8 @@ class Orchestrator:
                  constitution: RiskConstitution, orders: OrderManager,
                  journal: TradeJournal, shadows: ShadowBook,
                  monitor: PositionMonitor, tiers: TierManager,
-                 config: dict[str, Any], universe_config: dict[str, Any]):
+                 config: dict[str, Any], universe_config: dict[str, Any],
+                 presubmit: Any = None):
         self.db = db
         self.council = council
         self.constitution = constitution
@@ -227,6 +228,10 @@ class Orchestrator:
         self.tiers = tiers
         self.config = config
         self.universe_config = universe_config
+        # §17.4: reprice from live quotes and re-run risk immediately
+        # before submission. Optional so replay/tests without a market
+        # connection keep working; production wiring always supplies it.
+        self.presubmit = presubmit
 
     # ---- the decision path -------------------------------------------
 
@@ -312,18 +317,26 @@ class Orchestrator:
                                       DecisionState.STRUCTURE_SELECTED)
 
         # --- 2. risk constitution ------------------------------------
+        # The sector map lives in risk_constitution.yaml; universe.yaml has
+        # no `sectors` key, so reading it from there mapped every symbol to
+        # UNKNOWN and neutered the sector cap.
+        sector_map = (self.constitution.sectors
+                      or self.universe_config.get("sectors", {}))
         request = TradeRequest(
             decision_id=decision_id, symbol=candidate.symbol,
-            sector=sector_of(candidate.symbol,
-                             self.universe_config.get("sectors", {})),
+            sector=sector_of(candidate.symbol, sector_map),
             direction=candidate.direction, structure=selected,
             desired_risk_pct=effective_risk_pct(council),
             pm_confidence=(council.final_proposal.confidence
                            if council.final_proposal else 0.0),
             red_team_verdict=(council.review.verdict if council.review
                               else Verdict.PASS),
-            red_team_max_risk_pct=(council.review.recommended_max_risk_pct
-                                   if council.review else None),
+            # Claude's cap applies only when Claude asked for a change; a
+            # PASS carries a recommendation the attribution cannot see.
+            red_team_max_risk_pct=(
+                council.review.recommended_max_risk_pct
+                if council.review and council.review.verdict is Verdict.MODIFY
+                else None),
             equity_data_confidence=equity_confidence,
             option_data_confidence=option_confidence,
             final_opportunity_score=candidate.final_opportunity_score,
@@ -363,14 +376,74 @@ class Orchestrator:
             return outcome
 
         # --- 3. execution ---------------------------------------------
+        # §17.4 pre-submit refresh: reprice from live quotes, then re-run
+        # the Risk Constitution against the limit that will actually be
+        # submitted. No stale approval may be reused.
+        underlying_at_submit = selected.underlying_price or 0.0
+        if self.presubmit is not None:
+            refresh = await self.presubmit.refresh(
+                selected, self.tiers.tier_config())
+            if not refresh.ok:
+                outcome.stage = "EXECUTION"
+                outcome.gate_id = refresh.gate_id or "EXEC_STALE_PRESUBMIT"
+                outcome.reason = refresh.reason
+                if rejections is not None:
+                    rejections.add(candidate.symbol, GateStage.EXECUTION,
+                                   outcome.gate_id, candidate.direction,
+                                   decision_id=decision_id,
+                                   structure=selected,
+                                   note=refresh.reason[:200])
+                await self.journal.transition(decision_id,
+                                              DecisionState.REJECTED,
+                                              refresh.reason[:120])
+                return outcome
+
+            selected = refresh.structure or selected
+            underlying_at_submit = refresh.underlying_price or underlying_at_submit
+            request = replace(request, structure=selected)
+            evaluation = self.constitution.evaluate(
+                request, portfolio, tier=self.tiers.tier,
+                config_version=self.tiers.config_version, now=utc_now())
+            outcome.risk_decision = evaluation.decision
+            outcome.approved_qty = evaluation.approved_qty
+            await self.journal.record_risk(evaluation,
+                                           f"prop_{decision_id[-8:]}_r0",
+                                           selected.structure_id)
+            if evaluation.decision.blocks_trade or evaluation.approved_qty < 1:
+                outcome.stage = "RISK"
+                outcome.gate_id = (evaluation.violations[0].rule_id
+                                   if evaluation.violations
+                                   else "RISK_PRESUBMIT_BLOCKED")
+                outcome.reason = ("repriced structure failed re-approval: "
+                                  + (evaluation.violations[0].message
+                                     if evaluation.violations else ""))[:200]
+                if rejections is not None:
+                    rejections.add(candidate.symbol, GateStage.RISK,
+                                   outcome.gate_id, candidate.direction,
+                                   hard_gate=True, decision_id=decision_id,
+                                   structure=selected,
+                                   note=outcome.reason)
+                await self.journal.transition(decision_id,
+                                              DecisionState.RISK_REJECTED,
+                                              outcome.reason[:120])
+                return outcome
+            # The audit row must show the prices that were submitted.
+            await self.journal.record_structures(decision_id, [selected],
+                                                 candidate_id)
+
         await self.db.log_event(
             "INFO", "orchestrator", "STAGE_SUBMITTING",
             f"{candidate.symbol} qty {evaluation.approved_qty}",
             {"decision_id": decision_id})
         await self.journal.transition(decision_id,
                                       DecisionState.ORDER_SUBMITTED)
-        max_debit = (evaluation.approved_max_loss
-                     / max(1, evaluation.approved_qty) / 100.0)
+        # Walk ceiling: the granted risk BUDGET per spread, not the initial
+        # limit. approved_max_loss/qty equals the initial limit debit by
+        # construction, and a ceiling equal to the first rung means the
+        # walk's second and third attempts are clipped out of existence.
+        budget = evaluation.approved_risk_budget or evaluation.approved_max_loss
+        max_debit = budget / max(1, evaluation.approved_qty) / 100.0
+        max_debit = max(max_debit, selected.initial_limit_debit)
         execution = await self.orders.execute_with_walk(
             selected, decision_id, evaluation.approved_qty, max_debit)
 
@@ -415,14 +488,16 @@ class Orchestrator:
             invalidation=list(council.final_proposal.invalidation)
             if council.final_proposal else [],
             horizon_days=(council.final_proposal.expected_horizon_days
-                          if council.final_proposal else 5)))
+                          if council.final_proposal else 5),
+            track=candidate.track))
 
         self.tiers.note_order(
             is_alpha=candidate.track is not CandidateTrack.CALIBRATION)
 
         await self.orders.record_calibration(
             execution, selected, candidate.track, candidate.direction,
-            underlying_at_submit=selected.underlying_price or 0.0)
+            underlying_at_submit=underlying_at_submit
+            or selected.underlying_price or 0.01)
         return outcome
 
     # ---- shadow variants ---------------------------------------------

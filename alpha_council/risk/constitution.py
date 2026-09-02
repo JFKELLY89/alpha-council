@@ -33,6 +33,7 @@ from alpha_council.models.trading import OptionStructure
 from alpha_council.risk.position_sizing import (
     SizingResult,
     max_qty_under_portfolio_limits,
+    portfolio_risk_room,
     size_position,
 )
 from alpha_council.utils.time import parse_et_time, to_et, utc_now
@@ -52,9 +53,17 @@ class BlackoutWindow:
     def blocks(self, when: datetime, symbol: str | None = None) -> bool:
         if self.symbols and symbol and symbol.upper() not in self.symbols:
             return False
+        anchor = self.timestamp_et
+        if anchor.tzinfo is None:
+            # A calendar entry without an offset means ET, per the file's
+            # naming. .timestamp() on a naive datetime would interpret it
+            # in the machine's local zone instead.
+            from alpha_council.utils.time import ET
+
+            anchor = anchor.replace(tzinfo=ET)
         et = to_et(when)
-        start = self.timestamp_et.timestamp() - self.pre_block_minutes * 60
-        end = self.timestamp_et.timestamp() + self.post_block_minutes * 60
+        start = anchor.timestamp() - self.pre_block_minutes * 60
+        end = anchor.timestamp() + self.post_block_minutes * 60
         return start <= et.timestamp() <= end
 
 
@@ -134,6 +143,11 @@ class RiskConstitution:
         self.scoring = scoring_cfg
         self.blackouts = list(blackouts)
         self.paper_only = bool(risk_cfg.get("paper_only", True))
+        # The sector map lives in risk_constitution.yaml because it feeds
+        # the 4% sector cap. The orchestrator previously looked for it in
+        # universe.yaml, which has no such key, so every symbol mapped to
+        # UNKNOWN and the sector cap never distinguished anything.
+        self.sectors: dict[str, list[str]] = risk_cfg.get("sectors", {})
 
     def tier_cfg(self, tier: int) -> dict[str, Any]:
         return self.scoring.get("tiers", {}).get(tier, {})
@@ -174,6 +188,10 @@ class RiskConstitution:
             approved_max_loss=(sizing.approved_risk_dollars
                                if decision in (RiskDecision.APPROVE,
                                                RiskDecision.RESIZE) else 0.0),
+            approved_risk_budget=(sizing.budget_dollars
+                                  if decision in (RiskDecision.APPROVE,
+                                                  RiskDecision.RESIZE)
+                                  else 0.0),
             total_open_risk_pct_after=self._pct(
                 portfolio.open_risk_dollars
                 + sizing.approved_risk_dollars, portfolio.equity),
@@ -355,19 +373,26 @@ class RiskConstitution:
 
     def _size(self, request: TradeRequest, portfolio: PortfolioState,
               s: OptionStructure, v: list[RiskViolation]) -> SizingResult:
+        total_limit = float(
+            self.hard.get("max_total_open_option_risk_pct", 10.0))
+        sector_limit = float(self.hard.get("max_sector_open_risk_pct", 4.0))
         portfolio_max = max_qty_under_portfolio_limits(
             equity=portfolio.equity,
             max_loss_per_spread=s.max_loss_per_spread,
             current_open_risk=portfolio.open_risk_dollars,
-            total_limit_pct=float(
-                self.hard.get("max_total_open_option_risk_pct", 10.0)),
+            total_limit_pct=total_limit,
             current_sector_risk=portfolio.sector_risk(request.sector),
-            sector_limit_pct=float(self.hard.get("max_sector_open_risk_pct", 4.0)),
+            sector_limit_pct=sector_limit,
         )
 
+        # Claude's recommendation caps sizing only when Claude asked for a
+        # change (MODIFY). On PASS nothing changed and no CLAUDE_MODIFIED
+        # shadow variant exists, so honouring the number anyway would let a
+        # cap the attribution cannot see silently reshape the executed
+        # size. (The previous ternary here had identical branches.)
         red_team_pct = (request.red_team_max_risk_pct
-                        if request.red_team_verdict is not Verdict.PASS
-                        else request.red_team_max_risk_pct)
+                        if request.red_team_verdict is Verdict.MODIFY
+                        else None)
 
         sizing = size_position(
             equity=portfolio.equity,
@@ -377,6 +402,12 @@ class RiskConstitution:
             hard_cap_pct=float(self.hard.get("max_risk_per_trade_pct", 2.0)),
             max_qty=portfolio_max,
         )
+        # The walk's dollar ceiling: the binding cap, further bounded by the
+        # room left under the portfolio and sector limits.
+        room = portfolio_risk_room(
+            portfolio.equity, portfolio.open_risk_dollars, total_limit,
+            portfolio.sector_risk(request.sector), sector_limit)
+        sizing.budget_dollars = round(min(sizing.budget_dollars, room), 2)
 
         if portfolio_max == 0:
             v.append(RiskViolation(

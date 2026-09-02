@@ -82,7 +82,11 @@ class ExecutionOutcome:
 def build_intent(structure: OptionStructure, decision_id: str, qty: int,
                  limit_debit: float, revision: int = 0,
                  attempt: int = 1, closing: bool = False) -> ExecutionIntent:
-    """Turn an approved structure into a submittable multi-leg intent."""
+    """Turn an approved structure into a submittable multi-leg intent.
+
+    For a closing order, `limit_debit` is the net CREDIT demanded; the
+    payload carries it with a negative sign per the mleg convention.
+    """
     legs: list[OptionLeg] = []
     for leg in structure.legs:
         if closing:
@@ -99,6 +103,7 @@ def build_intent(structure: OptionStructure, decision_id: str, qty: int,
         structure_id=structure.structure_id,
         qty=qty,
         limit_debit=round(limit_debit, 2),
+        limit_is_credit=closing,
         attempt=attempt,
         legs=legs,
     )
@@ -123,6 +128,31 @@ def walk_prices(adjusted_mid: float, natural: float, buffer: float,
         if p > 0 and (not out or p > out[-1]):
             out.append(p)
     return out or [round(ceiling, 2)]
+
+
+def close_walk_prices(adjusted_mid: float, conservative: float,
+                      buffer: float, tick: float = 0.01) -> list[float]:
+    """Closing credits: three CREDIT targets, monotonically DEcreasing.
+
+    Mirror of walk_prices. Start near the adjusted-mid credit, concede
+    toward the conservative exit (sell the long at bid, buy the short back
+    at ask), never demand less than the greater of that floor and one tick.
+    A closing order priced as an opening debit is a marketable order
+    straight through the market and can fill at any credit at all.
+    """
+    floor = max(round(conservative, 2), tick)
+    mid = max(adjusted_mid, floor)
+    ladder = [
+        mid - 0.25 * (mid - floor) - buffer,
+        mid - 0.60 * (mid - floor) - buffer,
+        floor,
+    ]
+    out: list[float] = []
+    for price in ladder:
+        p = round(max(price, floor), 2)
+        if p >= tick and (not out or p < out[-1]):
+            out.append(p)
+    return out or [floor]
 
 
 class OrderManager:
@@ -169,10 +199,20 @@ class OrderManager:
             return None
 
     async def get_order(self, order_id: str) -> dict[str, Any] | None:
+        """None means the order does not exist. Anything else raises.
+
+        The previous version returned None for every error, which made a
+        transient 500 indistinguishable from a missing order — and the walk
+        would then cancel-and-reprice an order whose true state it never
+        saw. Callers that can tolerate uncertainty catch AlpacaError and
+        decide; nothing gets to mistake an outage for an absence.
+        """
         try:
             return await self.api._get(f"{self.api.trade_base}/v2/orders/{order_id}")
         except AlpacaError as exc:
-            return None if exc.status == 404 else None
+            if exc.status == 404:
+                return None
+            raise
 
     async def cancel(self, order_id: str) -> bool:
         return await self._delete(f"/v2/orders/{order_id}")
@@ -180,10 +220,15 @@ class OrderManager:
     # ---- submission -------------------------------------------------
 
     async def submit_idempotent(self, intent: ExecutionIntent) -> OrderReceipt:
-        """Submit once. On any ambiguity, adopt rather than resubmit."""
+        """Submit once. On any ambiguity, adopt rather than resubmit.
+
+        Adopted and recovered orders are persisted exactly like fresh ones:
+        an order that exists at the broker with no local row is an audit
+        hole, and _update_status against a missing row is a silent no-op.
+        """
         existing = await self.get_by_client_id(intent.client_order_id)
         if existing:
-            return OrderReceipt(
+            receipt = OrderReceipt(
                 decision_id=intent.decision_id,
                 client_order_id=intent.client_order_id,
                 alpaca_order_id=existing.get("id", ""),
@@ -191,6 +236,8 @@ class OrderManager:
                 submitted_at=parse_alpaca_ts(existing.get("submitted_at")) or utc_now(),
                 adopted=True, raw=existing,
             )
+            await self._persist_order(intent, receipt)
+            return receipt
 
         payload = intent.to_alpaca_payload()
         try:
@@ -204,13 +251,15 @@ class OrderManager:
                     "WARN", "order_manager", "ORDER_RECOVERED_AFTER_TIMEOUT",
                     "adopted an order found by client ID after a transport error",
                     {"client_order_id": intent.client_order_id})
-                return OrderReceipt(
+                receipt = OrderReceipt(
                     decision_id=intent.decision_id,
                     client_order_id=intent.client_order_id,
                     alpaca_order_id=recovered.get("id", ""),
                     status=recovered.get("status", "unknown"),
                     submitted_at=utc_now(), adopted=True, raw=recovered,
                 )
+                await self._persist_order(intent, receipt)
+                return receipt
             raise AlpacaError(0, "/v2/orders", f"transport failure: {exc}")
 
         receipt = OrderReceipt(
@@ -238,7 +287,7 @@ class OrderManager:
                 {"client_order_id": intent.client_order_id,
                  "alpaca_order_id": receipt.alpaca_order_id,
                  "qty": intent.qty, "limit": intent.limit_debit})
-            print(f"[order_manager] ORDER FILLED BUT NOT RECORDED: "
+            print(f"[order_manager] ORDER LIVE AT BROKER BUT NOT RECORDED: "
                   f"{receipt.alpaca_order_id} — {exc}", flush=True)
 
     async def _write_order(self, intent: ExecutionIntent,
@@ -262,11 +311,39 @@ class OrderManager:
         deadline = utc_now().timestamp() + timeout
         last: dict[str, Any] | None = None
         while utc_now().timestamp() < deadline:
-            last = await self.get_order(order_id)
+            try:
+                last = await self.get_order(order_id)
+            except AlpacaError:
+                # A transient read failure is not a state; keep polling
+                # until the deadline rather than guessing.
+                await asyncio.sleep(self.poll_seconds)
+                continue
             if last and last.get("status") in TERMINAL_STATUSES:
                 return last
             await asyncio.sleep(self.poll_seconds)
         return last
+
+    async def _confirm_after_cancel(self, order_id: str
+                                    ) -> dict[str, Any] | None:
+        """State of an order after a cancel request, or None if unknowable.
+
+        The race this guards: the order fills between the last poll and the
+        cancel. Alpaca rejects the cancel, and repricing without checking
+        would submit a SECOND spread for the same decision. Ask, then act.
+        """
+        await asyncio.sleep(1.0)
+        for _ in range(3):
+            try:
+                order = await self.get_order(order_id)
+            except AlpacaError:
+                await asyncio.sleep(self.poll_seconds)
+                continue
+            if order is None:
+                return None
+            if order.get("status") in TERMINAL_STATUSES:
+                return order
+            await asyncio.sleep(self.poll_seconds)
+        return None
 
     # ---- the walk ---------------------------------------------------
 
@@ -275,16 +352,37 @@ class OrderManager:
                                 max_allowed_debit: float,
                                 revision: int = 0,
                                 closing: bool = False,
-                                fill_bias_buffer: float = 0.0
+                                fill_bias_buffer: float = 0.0,
+                                close_adjusted_mid: float | None = None,
+                                close_conservative: float | None = None,
                                 ) -> ExecutionOutcome:
-        outcome = ExecutionOutcome(decision_id=decision_id, filled=False, qty=qty)
+        """Open: walk the debit UP toward natural, capped by risk.
+        Close: walk the demanded credit DOWN toward the conservative exit.
 
-        prices = walk_prices(
-            adjusted_mid=structure.adjusted_mid_debit,
-            natural=structure.natural_debit,
-            buffer=structure.staleness_buffer + max(0.0, fill_bias_buffer),
-            max_allowed=max_allowed_debit,
-        )
+        For closes, pass the CURRENT marks when available; entry-time
+        quotes are the fallback, not the preference.
+        """
+        buffer = structure.staleness_buffer + max(0.0, fill_bias_buffer)
+        if closing:
+            mid = (close_adjusted_mid if close_adjusted_mid is not None
+                   else structure.adjusted_mid_debit)
+            conservative = (close_conservative if close_conservative is not None
+                            else structure.long_leg.bid - structure.short_leg.ask)
+            prices = close_walk_prices(mid, conservative, buffer)
+        else:
+            prices = walk_prices(
+                adjusted_mid=structure.adjusted_mid_debit,
+                natural=structure.natural_debit,
+                buffer=buffer,
+                max_allowed=max_allowed_debit,
+            )
+        return await self._run_walk(structure, decision_id, qty, prices,
+                                    revision=revision, closing=closing)
+
+    async def _run_walk(self, structure: OptionStructure, decision_id: str,
+                        qty: int, prices: list[float], revision: int,
+                        closing: bool) -> ExecutionOutcome:
+        outcome = ExecutionOutcome(decision_id=decision_id, filled=False, qty=qty)
 
         for attempt, limit in enumerate(prices, start=1):
             intent = build_intent(structure, decision_id, qty, limit,
@@ -314,28 +412,64 @@ class OrderManager:
             step.status = status
 
             if status == "filled":
-                fill_price = _extract_fill_debit(final or {}, limit)
-                step.fill_price = fill_price
-                step.filled_at = parse_alpaca_ts((final or {}).get("filled_at"))
-                outcome.filled = True
-                outcome.fill_debit = fill_price
-                outcome.filled_at = step.filled_at or utc_now()
-                outcome.order_id = receipt.alpaca_order_id
-                outcome.client_order_id = receipt.client_order_id
-                outcome.final_status = "FILLED"
-                await self._update_status(receipt.client_order_id, status)
-                return outcome
+                return await self._record_fill(outcome, step, receipt,
+                                               final or {}, limit, closing)
 
-            if status in TERMINAL_STATUSES and status != "filled":
+            if status in TERMINAL_STATUSES:
                 await self._update_status(receipt.client_order_id, status)
                 continue
 
             # Still working after the wait: cancel before repricing, so two
-            # live orders for one decision can never coexist.
+            # live orders for one decision can never coexist. Then VERIFY:
+            # the order may have filled in the race between the last poll
+            # and the cancel, and repricing on top of a fill would double
+            # the position.
             await self.cancel(receipt.alpaca_order_id)
-            await self._update_status(receipt.client_order_id, "canceled")
+            confirmed = await self._confirm_after_cancel(
+                receipt.alpaca_order_id)
+            confirmed_status = (confirmed or {}).get("status", "unknown")
+
+            if confirmed_status == "filled":
+                step.status = "filled"
+                return await self._record_fill(outcome, step, receipt,
+                                               confirmed or {}, limit,
+                                               closing)
+
+            if confirmed is None or confirmed_status not in TERMINAL_STATUSES:
+                # State unknowable. Submitting another price now risks two
+                # live spreads for one decision; stop and surface it.
+                step.status = "unknown_after_cancel"
+                outcome.error = ("order state unknowable after cancel; walk "
+                                 "stopped to avoid a duplicate submission")
+                outcome.final_status = "UNKNOWN_ORDER_STATE"
+                await self.db.log_event(
+                    "ERROR", "order_manager", "ORDER_STATE_UNKNOWN",
+                    f"{receipt.alpaca_order_id} not terminal after cancel; "
+                    "walk aborted",
+                    {"decision_id": decision_id,
+                     "order_id": receipt.alpaca_order_id})
+                return outcome
+
+            step.status = confirmed_status
+            await self._update_status(receipt.client_order_id,
+                                      confirmed_status)
 
         outcome.final_status = "NO_FILL" if not outcome.error else "ERROR"
+        return outcome
+
+    async def _record_fill(self, outcome: ExecutionOutcome, step: WalkStep,
+                           receipt: OrderReceipt, final: dict[str, Any],
+                           limit: float, closing: bool) -> ExecutionOutcome:
+        fill_price = _extract_fill_debit(final, limit, closing=closing)
+        step.fill_price = fill_price
+        step.filled_at = parse_alpaca_ts(final.get("filled_at"))
+        outcome.filled = True
+        outcome.fill_debit = fill_price
+        outcome.filled_at = step.filled_at or utc_now()
+        outcome.order_id = receipt.alpaca_order_id
+        outcome.client_order_id = receipt.client_order_id
+        outcome.final_status = "FILLED"
+        await self._update_status(receipt.client_order_id, "filled")
         return outcome
 
     async def _update_status(self, cid: str, status: str) -> None:
@@ -350,18 +484,43 @@ class OrderManager:
                                  track: CandidateTrack, direction: Direction,
                                  underlying_at_submit: float,
                                  underlying_at_fill: float | None = None,
-                                 closing: bool = False) -> ExecutionCalibration | None:
-        """Measure indicative-reference-to-fill bias (§17.5)."""
+                                 closing: bool = False,
+                                 close_adjusted_mid: float | None = None,
+                                 close_conservative: float | None = None,
+                                 decision_id: str | None = None,
+                                 ) -> ExecutionCalibration | None:
+        """Measure indicative-reference-to-fill bias (§17.5).
+
+        Every submitted opening AND closing spread creates a record. For a
+        close, the reference is the current adjusted mid credit and the
+        floor is the conservative exit; pass them when known, entry-time
+        values are only a fallback.
+        """
         if not outcome.steps:
             return None
 
         side = OrderSide.CLOSE if closing else OrderSide.OPEN
         underlying_at_quote = (structure.underlying_price
                                or underlying_at_submit)
+        base_decision = decision_id or outcome.decision_id
+        if closing:
+            adjusted_ref = max(0.01, close_adjusted_mid
+                               if close_adjusted_mid is not None
+                               else structure.adjusted_mid_debit)
+            # Rounded to the tick exactly as the ladder floor is, so the
+            # final submitted credit compares cleanly against it.
+            conservative = (close_conservative
+                            if close_conservative is not None
+                            else structure.long_leg.bid
+                            - structure.short_leg.ask)
+            natural_ref = max(0.01, round(conservative, 2))
+        else:
+            adjusted_ref = structure.adjusted_mid_debit
+            natural_ref = structure.natural_debit
 
         record = ExecutionCalibration.with_derived(
-            calibration_id=calibration_id(outcome.decision_id, str(side)),
-            decision_id=outcome.decision_id,
+            calibration_id=calibration_id(base_decision, str(side)),
+            decision_id=base_decision,
             symbol=structure.symbol,
             side=side,
             candidate_track=track,
@@ -369,8 +528,8 @@ class OrderManager:
             submitted_at=outcome.steps[0].submitted_at,
             filled_at=outcome.filled_at,
             indicative_raw_mid=max(0.01, structure.raw_mid_debit),
-            indicative_adjusted_mid=structure.adjusted_mid_debit,
-            natural_debit_estimate=structure.natural_debit,
+            indicative_adjusted_mid=adjusted_ref,
+            natural_debit_estimate=natural_ref,
             initial_limit_debit=outcome.steps[0].limit_debit,
             final_submitted_limit=outcome.steps[-1].limit_debit,
             actual_fill_debit=outcome.fill_debit,
@@ -420,8 +579,14 @@ class OrderManager:
         return orders if isinstance(orders, list) else []
 
 
-def _extract_fill_debit(order: dict[str, Any], fallback: float) -> float:
-    """Net debit actually paid, from the order or its legs."""
+def _extract_fill_debit(order: dict[str, Any], fallback: float,
+                        closing: bool = False) -> float:
+    """Net amount actually filled, as a positive magnitude.
+
+    Opening: the net debit paid (buys minus sells). Closing: the net credit
+    received (sells minus buys). Either way the caller gets a positive
+    number in the same units as the submitted limit.
+    """
     avg = order.get("filled_avg_price")
     if avg:
         try:
@@ -439,7 +604,11 @@ def _extract_fill_debit(order: dict[str, Any], fallback: float) -> float:
                 continue
             seen = True
             qty = float(leg.get("ratio_qty") or 1)
-            sign = 1.0 if str(leg.get("side", "")).lower() == "buy" else -1.0
+            buy = str(leg.get("side", "")).lower() == "buy"
+            if closing:
+                sign = -1.0 if buy else 1.0     # credit: sells add, buys cost
+            else:
+                sign = 1.0 if buy else -1.0     # debit: buys add, sells offset
             net += sign * abs(float(price)) * qty
         if seen and net > 0:
             return round(net, 4)

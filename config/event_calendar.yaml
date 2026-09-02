@@ -23,37 +23,46 @@ events:
     post_block_minutes: 5
 
   # ---- earnings: scoped to the reporting symbol ----
+  #
+  # Spec §16.4 default rule: block initiating a directional spread from
+  # T-30m THROUGH THE FIRST 10 MINUTES OF THE FOLLOWING SESSION. An
+  # after-close print at 16:20 therefore blocks until 09:40 the next
+  # morning: 16:20 + 1040 minutes = 09:40 ET. The previous 10-minute
+  # post-window would have let the system buy the reporter's gap open.
+  #
+  # AVGO date re-verified 2026-09-01 against Broadcom's own announcement
+  # (Q3 FY2026 results Sep 2 after close, call 17:00 ET).
   - name: Dell Technologies FQ2 earnings
     source: earnings
     timestamp_et: "2026-09-01T16:20:00-04:00"
     pre_block_minutes: 30
-    post_block_minutes: 10
+    post_block_minutes: 1040
     symbols: [DELL]
 
   - name: Palo Alto Networks FQ4 earnings
     source: earnings
     timestamp_et: "2026-09-01T16:20:00-04:00"
     pre_block_minutes: 30
-    post_block_minutes: 10
+    post_block_minutes: 1040
     symbols: [PANW]
 
   - name: Broadcom FQ3 earnings
     source: earnings
     timestamp_et: "2026-09-02T16:20:00-04:00"
     pre_block_minutes: 30
-    post_block_minutes: 10
+    post_block_minutes: 1040
     symbols: [AVGO]
 
   - name: Snowflake FQ2 earnings
     source: earnings
     timestamp_et: "2026-09-02T16:20:00-04:00"
     pre_block_minutes: 30
-    post_block_minutes: 10
+    post_block_minutes: 1040
     symbols: [SNOW]
 
   - name: Lululemon FQ2 earnings
     source: earnings
     timestamp_et: "2026-09-03T16:20:00-04:00"
     pre_block_minutes: 30
-    post_block_minutes: 10
+    post_block_minutes: 1040
     symbols: [LULU]

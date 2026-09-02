@@ -41,20 +41,31 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from alpha_council.agents.budget import BudgetManager  # noqa: E402
+from alpha_council.agents.alpha_evolution import AlphaEvolutionAgent  # noqa: E402
+from alpha_council.agents.budget import BudgetManager, unpriced_models  # noqa: E402
 from alpha_council.agents.council import Council  # noqa: E402
 from alpha_council.agents.llm import AnthropicClient, OpenAIClient  # noqa: E402
+from alpha_council.agents.premarket import PreMarketStrategist  # noqa: E402
 from alpha_council.alpaca.market_data import MarketDataService  # noqa: E402
 from alpha_council.alpaca.mcp_client import AlpacaMCPClient, ControlPlane  # noqa: E402
 from alpha_council.alpaca.rest_client import AlpacaRestClient  # noqa: E402
 from alpha_council.alpaca.screeners import AssetCatalog, ScreenerService  # noqa: E402
 from alpha_council.db.config_store import ensure_config_version  # noqa: E402
 from alpha_council.db.engine import Database  # noqa: E402
+from alpha_council.evolution.champion import ChampionRegistry  # noqa: E402
+from alpha_council.evolution.lessons import LessonGenerator  # noqa: E402
+from alpha_council.evolution.service import EvolutionService  # noqa: E402
+from alpha_council.evolution.shadow_runner import ShadowRunner  # noqa: E402
 from alpha_council.execution.order_manager import OrderManager  # noqa: E402
 from alpha_council.execution.position_monitor import PositionMonitor  # noqa: E402
+from alpha_council.execution.presubmit import PreSubmitRefresher  # noqa: E402
 from alpha_council.intelligence.news import NewsIntelligence  # noqa: E402
+from alpha_council.intelligence.sec import SECIntelligence  # noqa: E402
 from alpha_council.journal.marks import LiveMarkSource  # noqa: E402
-from alpha_council.journal.shadow_book import ShadowBook  # noqa: E402
+from alpha_council.journal.shadow_book import (  # noqa: E402
+    RejectedShadowBook,
+    ShadowBook,
+)
 from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 from alpha_council.models.enums import MarkMethod  # noqa: E402
 from alpha_council.options_engine.chain import ChainService  # noqa: E402
@@ -160,12 +171,18 @@ async def run(args: argparse.Namespace) -> int:
         # ---- agents --------------------------------------------------
         budget = BudgetManager(db, scoring)
         await budget.load()
-        council = Council(
-            OpenAIClient(db, budget, scoring,
-                         settings.openai_api_key.get_secret_value()),
-            AnthropicClient(db, budget, scoring,
-                            settings.anthropic_api_key.get_secret_value()),
-            scoring)
+        missing_prices = unpriced_models(scoring)
+        if missing_prices:
+            say("  WARNING: models with NO price entry (billed at the "
+                "worst-case rate until fixed):")
+            for entry in missing_prices:
+                say(f"    - {entry}")
+        openai_client = OpenAIClient(
+            db, budget, scoring, settings.openai_api_key.get_secret_value())
+        anthropic_client = AnthropicClient(
+            db, budget, scoring,
+            settings.anthropic_api_key.get_secret_value())
+        council = Council(openai_client, anthropic_client, scoring)
         say(f"  budget           : {budget.summary()}")
 
         # ---- risk, execution, journal ---------------------------------
@@ -187,15 +204,54 @@ async def run(args: argparse.Namespace) -> int:
             max_underlying_drift_pct=float(
                 options_cfg.get("max_underlying_drift_pct", 0.010)))
         shadows = ShadowBook(db, marks, MarkMethod.ADJUSTED_MID)
+        rejected_shadows = RejectedShadowBook(db, marks,
+                                              MarkMethod.ADJUSTED_MID)
+        # The monitor gets the mark source (closes priced off CURRENT
+        # quotes, advisory triggers live) and the shadow book (variants
+        # freeze at the actual exit when the real position closes).
         monitor = PositionMonitor(db, market, orders, journal, scoring,
-                                  risk_cfg)
+                                  risk_cfg, marks=marks, shadows=shadows)
 
         news = NewsIntelligence(api, db, scoring)
+        sec_cfg = scoring.get("sec", {})
+        sec = None
+        if sec_cfg.get("enabled", True):
+            sec = SECIntelligence(
+                db, scoring, settings.sec_user_agent,
+                max_symbols_per_cycle=int(
+                    sec_cfg.get("max_symbols_per_cycle", 40)),
+                cooldown_seconds=float(sec_cfg.get("cooldown_seconds", 600)))
+            say("  sec collector    : enabled (EDGAR active-universe polling)")
+
+        presubmit = PreSubmitRefresher(api, market, scoring)
         tiers = TierManager(scoring, config_version)
         tiers.start_session()
         orchestrator = Orchestrator(db, council, constitution, orders,
                                     journal, shadows, monitor, tiers,
-                                    scoring, universe_cfg)
+                                    scoring, universe_cfg,
+                                    presubmit=presubmit)
+
+        # ---- alpha evolution (v2.5: advisory + shadow only) -----------
+        evo_cfg = scoring.get("alpha_evolution", {})
+        registry = ChampionRegistry(db, evo_cfg)
+        champion_id = await registry.ensure_champion(config_version, scoring)
+        say(f"  champion         : {champion_id}")
+
+        premarket = PreMarketStrategist(
+            openai_client, db, market, scoring,
+            blackouts=load_blackouts(calendar), champion_id=champion_id)
+
+        evolution = None
+        if evo_cfg.get("enabled", True):
+            evolution = EvolutionService(
+                db, registry,
+                lessons=LessonGenerator(openai_client, db, scoring),
+                agent=AlphaEvolutionAgent(openai_client, db, registry,
+                                          scoring),
+                shadow=ShadowRunner(db), config=scoring)
+            challenger = await registry.active_challenger()
+            say(f"  evolution        : enabled; challenger "
+                f"{'active: ' + challenger['strategy_id'] if challenger else 'none'}")
 
         # ---- restore --------------------------------------------------
         rule("2. RESTORE")
@@ -205,6 +261,9 @@ async def run(args: argparse.Namespace) -> int:
             for position in monitor.tracked:
                 say(f"    {position.symbol} x{position.qty} @ "
                     f"{position.entry_debit:.2f}, {position.dte(utc_now())} DTE")
+
+        shadow_variants = await shadows.restore()
+        say(f"  shadow variants  : {shadow_variants} restored")
 
         performance = await journal.performance()
         say(f"  closed trades    : {performance['closed_trades']}")
@@ -217,7 +276,9 @@ async def run(args: argparse.Namespace) -> int:
             market=market, screeners=screeners, budget=budget,
             control=control,
             config=scoring, risk_config=risk_cfg,
-            universe_config=universe_cfg, news=news,
+            universe_config=universe_cfg, news=news, sec=sec,
+            rejected_shadows=rejected_shadows,
+            evolution=evolution, premarket=premarket,
             max_trades=args.max_trades, dry_run=args.dry_run)
 
         await db.log_event(
@@ -238,11 +299,13 @@ async def run(args: argparse.Namespace) -> int:
             # this the process hangs after the scan completes.
             say(f"  mcp transport         : {control.summary()}")
             await mcp.close()
+            if sec is not None:
+                await sec.close()
             return 0
 
         # ---- scheduled mode -------------------------------------------
         rule("3. SCHEDULER")
-        sched_cfg = SchedulerConfig.from_config(scoring)
+        sched_cfg = SchedulerConfig.from_config(scoring, risk_cfg)
         scheduler = build_scheduler(session, sched_cfg)
         scheduler.start()
 
@@ -291,6 +354,8 @@ async def run(args: argparse.Namespace) -> int:
             say(f"  budget               : {budget.summary()}")
             say(f"  mcp transport        : {control.summary()}")
             await mcp.close()
+            if sec is not None:
+                await sec.close()
 
             await db.log_event("INFO", "run_alpha_council", "SESSION_ENDED",
                                "clean shutdown", {"report": report})

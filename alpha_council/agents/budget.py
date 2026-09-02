@@ -70,16 +70,40 @@ class BudgetDecision:
 def compute_cost(model: str, input_tokens: int, output_tokens: int,
                  prices: dict[str, dict[str, float]],
                  cached_tokens: int = 0) -> float:
-    """Reasoning and thinking tokens bill as output on all three models."""
+    """Reasoning and thinking tokens bill as output on all three models.
+
+    An UNKNOWN model id is priced at the most expensive configured model
+    rather than $0. A silently-free model would make every budget ceiling
+    vacuous — the single failure mode this manager exists to prevent.
+    The caller logs the mismatch; this function keeps enforcement alive.
+    """
     p = prices.get(model)
     if not p:
-        return 0.0
+        if not prices:
+            return 0.0
+        p = max(prices.values(),
+                key=lambda x: x.get("input", 0.0) + x.get("output", 0.0))
     billable_input = max(0, input_tokens - cached_tokens)
     cached_cost = cached_tokens / 1e6 * p.get("input", 0.0) * 0.1
     return round(
         billable_input / 1e6 * p.get("input", 0.0)
         + output_tokens / 1e6 * p.get("output", 0.0)
         + cached_cost, 6)
+
+
+def unpriced_models(config: dict[str, Any]) -> list[str]:
+    """Model ids referenced in models.* with no model_prices entry.
+
+    Run at startup: every name this returns would otherwise be billed at
+    the worst-case fallback rate, which is safe but wrong — fix the config.
+    """
+    prices = config.get("model_prices", {})
+    missing = []
+    for purpose, spec in (config.get("models", {}) or {}).items():
+        model = (spec or {}).get("model", "")
+        if model and model not in prices:
+            missing.append(f"{purpose}: {model}")
+    return missing
 
 
 class BudgetManager:
@@ -189,6 +213,12 @@ class BudgetManager:
     async def record(self, usage: UsageRecord, endpoint: str = "",
                      session_id: str | None = None) -> float:
         if usage.cost_usd <= 0:
+            if usage.model not in self.prices and self.prices:
+                await self.db.log_event(
+                    "ERROR", "budget", "BUDGET_UNPRICED_MODEL",
+                    f"{usage.model!r} has no model_prices entry; billing at "
+                    "the most expensive configured rate",
+                    {"model": usage.model, "purpose": usage.purpose})
             usage.cost_usd = compute_cost(
                 usage.model, usage.input_tokens, usage.output_tokens,
                 self.prices, usage.cached_tokens)

@@ -209,9 +209,16 @@ class ChainService:
             return None
 
         oi = snap.get("openInterest") or snap.get("open_interest")
-        if oi is not None and int(oi) < filters.min_open_interest:
-            result.rejections.append((occ, "OPT_OI_TOO_LOW", str(oi)))
-            return None
+        if filters.min_open_interest > 0:
+            # A missing OI is not evidence of liquidity. When the tier
+            # demands a floor, absence fails it — the previous check let
+            # a contract with no OI field through every tier.
+            if oi is None:
+                result.rejections.append((occ, "OPT_OI_MISSING", "absent"))
+                return None
+            if int(oi) < filters.min_open_interest:
+                result.rejections.append((occ, "OPT_OI_TOO_LOW", str(oi)))
+                return None
 
         vol = (snap.get("dailyBar") or {}).get("v") or trade.get("s") or 0
         if filters.min_volume > 0 and int(vol or 0) < filters.min_volume:

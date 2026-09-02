@@ -336,10 +336,14 @@ class SpreadBuilder:
         makes the selection step theatre rather than a decision.
         """
         chosen: list[OptionStructure] = []
-        seen_pairs: set[tuple[float, float]] = set()
+        seen_pairs: set[tuple[float, float, str]] = set()
 
         for s in built:
-            pair = (s.long_leg.strike, s.short_leg.strike)
+            # Expiration is part of the identity: the same strikes a week
+            # apart are different trades, and deduping them away starved
+            # the PM of real choices on thin chains.
+            pair = (s.long_leg.strike, s.short_leg.strike,
+                    s.expiration.isoformat())
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)

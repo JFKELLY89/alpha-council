@@ -426,11 +426,20 @@ def test_stale_quotes_excluded_from_learning():
 
 def test_open_and_close_kept_separate():
     opens = [_calibration(calibration_id=f"o{i}") for i in range(4)]
-    closes = [_calibration(calibration_id=f"c{i}", side=OrderSide.CLOSE)
+    # A CLOSE record's natural_debit_estimate is the conservative CREDIT
+    # floor, which the demanded credit must not fall below.
+    closes = [_calibration(calibration_id=f"c{i}", side=OrderSide.CLOSE,
+                           natural_debit_estimate=5.20)
               for i in range(4)]
     est = FillBiasEstimate.from_records(opens + closes, side=OrderSide.CLOSE,
                                         computed_at=NOW)
     assert est.sample_size == 4
+
+
+def test_close_credit_may_not_fall_below_conservative_floor():
+    with pytest.raises(ValidationError, match="fell below"):
+        _calibration(side=OrderSide.CLOSE, natural_debit_estimate=5.90,
+                     final_submitted_limit=5.65)
 
 
 def test_buffer_requires_sample_validator():

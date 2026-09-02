@@ -235,8 +235,11 @@ class TradeJournal:
                           reason: ExitReason,
                           closed_at: datetime | None = None,
                           lesson: str | None = None) -> TradeRecord | None:
+        # trade_journal has no symbol column; it lives on decisions.
         row = await self.db.fetchone(
-            "SELECT * FROM trade_journal WHERE decision_id=?", (decision_id,))
+            "SELECT t.*, d.symbol AS symbol FROM trade_journal t "
+            "LEFT JOIN decisions d ON d.decision_id = t.decision_id "
+            "WHERE t.decision_id=?", (decision_id,))
         if not row:
             return None
 
@@ -260,7 +263,7 @@ class TradeJournal:
 
         return TradeRecord(
             trade_id=row["trade_id"], decision_id=decision_id,
-            symbol=row.get("symbol", ""), status="CLOSED", qty=qty,
+            symbol=row.get("symbol") or "", status="CLOSED", qty=qty,
             entry_debit=entry, exit_credit=exit_credit,
             realized_pnl=realized, realized_return_pct=return_pct,
             closed_at=closed, exit_reason=str(reason))
@@ -310,13 +313,24 @@ class TradeJournal:
 
 
 class RejectionLog:
-    """Single writer for gate_rejections, so no stage invents its own shape."""
+    """Single writer for gate_rejections, so no stage invents its own shape.
 
-    def __init__(self, db: Database, config_version: str, tier: int = 1):
+    When a rejected-shadow book is attached, every shadow-eligible
+    rejection also creates a rejected_shadows row at flush time — the other
+    half of the demo claim ("what did each gate cost us on the trades we
+    didn't take"). Without the wiring, GateValue had nothing to measure.
+    """
+
+    def __init__(self, db: Database, config_version: str, tier: int = 1,
+                 rejected_shadows: Any = None,
+                 shadow_horizon_days: int = 5):
         self.db = db
         self.config_version = config_version
         self.tier = tier
+        self.rejected_shadows = rejected_shadows
+        self.shadow_horizon_days = shadow_horizon_days
         self.buffer: list[GateRejection] = []
+        self._structures: dict[str, OptionStructure] = {}
 
     def add(self, symbol: str, stage: GateStage, gate_id: str,
             direction: Direction = Direction.NEUTRAL,
@@ -339,6 +353,8 @@ class RejectionLog:
                                    if shadow_eligible else None),
             note=note)
         self.buffer.append(rejection)
+        if shadow_eligible and structure is not None:
+            self._structures[rejection.rejection_id] = structure
         return rejection
 
     async def flush(self) -> int:
@@ -356,8 +372,38 @@ class RejectionLog:
             "gate_id, observed_value, threshold_value, tier, hard_gate, "
             "shadow_eligible, shadow_structure_json, note) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+
+        if self.rejected_shadows is not None:
+            from datetime import timedelta
+
+            from alpha_council.utils.time import (
+                COMPETITION_FLATTEN_ET,
+                to_utc,
+            )
+            for r in self.buffer:
+                structure = self._structures.get(r.rejection_id)
+                if not (r.shadow_eligible and structure is not None):
+                    continue
+                horizon = min(
+                    r.occurred_at + timedelta(days=self.shadow_horizon_days),
+                    to_utc(COMPETITION_FLATTEN_ET))
+                if horizon <= r.occurred_at:
+                    # Post-competition use: the flatten anchor is in the
+                    # past; fall back to the plain horizon.
+                    horizon = r.occurred_at + timedelta(
+                        days=self.shadow_horizon_days)
+                try:
+                    await self.rejected_shadows.create(
+                        r.rejection_id, r.symbol, structure,
+                        horizon_end=horizon, entry_timestamp=r.occurred_at)
+                except Exception as exc:  # noqa: BLE001 - measurement only
+                    await self.db.log_event(
+                        "ERROR", "rejection_log", "REJECTED_SHADOW_FAILED",
+                        f"{r.rejection_id}: {exc}"[:200])
+
         count = len(rows)
         self.buffer.clear()
+        self._structures.clear()
         return count
 
     async def histogram(self) -> list[dict[str, Any]]:

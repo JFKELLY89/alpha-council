@@ -84,8 +84,15 @@ def test_cached_tokens_are_cheaper():
     assert cached < plain
 
 
-def test_unknown_model_costs_nothing_rather_than_crashing():
-    assert compute_cost("gpt-9-nonexistent", 1000, 1000, PRICES) == 0.0
+def test_unknown_model_billed_at_worst_case_not_zero():
+    """A silently-free model would make every budget ceiling vacuous —
+    the one failure mode the manager exists to prevent. Unknown ids bill
+    at the most expensive configured rate (and the recorder logs it)."""
+    unknown = compute_cost("gpt-9-nonexistent", 1000, 1000, PRICES)
+    dearest = max(compute_cost(m, 1000, 1000, PRICES) for m in PRICES)
+    assert unknown == dearest > 0.0
+    # With no price table at all there is nothing to fall back to.
+    assert compute_cost("anything", 1000, 1000, {}) == 0.0
 
 
 # ======================================================================

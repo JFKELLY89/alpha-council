@@ -27,11 +27,20 @@ from alpha_council.models.intelligence import IntelligenceEvent
 from alpha_council.quant.discovery import Stage0Result
 from alpha_council.utils.math import clip, weighted_sum
 
-# A catalyst must be at least this strong, and this fresh, to make a
-# candidate EVENT rather than MOMENTUM. Below the bar the intelligence is
-# background context, not a reason to trade.
+# A catalyst must be at least this strong, this fresh, AND this material
+# to make a candidate EVENT rather than MOMENTUM. Below the bar the
+# intelligence is background context, not a reason to trade.
+#
+# The materiality floor exists because the §10.3 formula's additive terms
+# (source reliability, freshness, neutral surprise) floor a FRESH item
+# from a reliable source near catalyst ~55 even when the content is a
+# routine 424B2 supplement or an insider Form 4. Measured on the first
+# live SEC sweep (2026-09-01): 493 routine prospectus supplements averaged
+# catalyst 57. "Material" has to mean material, not merely fresh and
+# well-sourced.
 EVENT_CATALYST_FLOOR = 55.0
 EVENT_FRESHNESS_FLOOR = 25.0
+EVENT_MATERIALITY_FLOOR = 50.0
 
 DEFAULT_PRE_WEIGHTS_EVENT = {
     "momentum": 0.20, "relative_volume": 0.20, "trend_regime": 0.15,
@@ -63,6 +72,10 @@ class IntelSummary:
     corroboration_score: float = 0.0
     novelty_score: float = 0.0
     freshness_score: float = 0.0
+    # Materiality of the event the catalyst score came from. Defaults to
+    # 100 so a hand-built summary in a test (or any caller that predates
+    # the field) keeps its old behavior; summarize_intel always sets it.
+    materiality_score: float = 100.0
     direction: Direction = Direction.NEUTRAL
     direction_confidence: float = 0.0
     event_count: int = 0
@@ -72,7 +85,8 @@ class IntelSummary:
     def has_material_catalyst(self) -> bool:
         return (self.event_count > 0
                 and self.catalyst_score >= EVENT_CATALYST_FLOOR
-                and self.freshness_score >= EVENT_FRESHNESS_FLOOR)
+                and self.freshness_score >= EVENT_FRESHNESS_FLOOR
+                and self.materiality_score >= EVENT_MATERIALITY_FLOOR)
 
     @property
     def signed_direction(self) -> float:
@@ -109,6 +123,7 @@ def summarize_intel(events: Sequence[IntelligenceEvent]) -> IntelSummary:
         corroboration_score=clip(wavg("corroboration_score")),
         novelty_score=clip(wavg("novelty_score")),
         freshness_score=clip(wavg("freshness_score")),
+        materiality_score=clip(strongest.materiality_score),
         direction=strongest.direction,
         direction_confidence=strongest.direction_confidence,
         event_count=len(events),

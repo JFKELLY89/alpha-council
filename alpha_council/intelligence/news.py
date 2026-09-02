@@ -32,6 +32,7 @@ Place at: alpha_council/intelligence/news.py
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -321,9 +322,21 @@ class NewsIntelligence:
 
     async def collect(self, symbols: Sequence[str], lookback_hours: int = 24,
                       price_returns: dict[str, float] | None = None,
-                      now: datetime | None = None
+                      now: datetime | None = None,
+                      include_offcore: bool = True,
+                      market_wide: bool = False,
+                      market_wide_limit: int = 50,
                       ) -> dict[str, list[IntelligenceEvent]]:
-        """Fetch, score and persist. Returns events keyed by symbol."""
+        """Fetch, score and persist. Returns events keyed by symbol.
+
+        include_offcore keeps events for symbols tagged on a story that are
+        NOT in the requested list — the raw material for spec §10.2's
+        off-core discovery injection. The caller decides what to inject; a
+        dropped-on-the-floor symbol can never be injected by anyone.
+
+        market_wide adds one unfiltered recent-news query so a story about
+        a symbol nowhere near the universe can still surface it.
+        """
         now = now or utc_now()
         price_returns = price_returns or {}
         self.stats = NewsStats()
@@ -337,6 +350,18 @@ class NewsIntelligence:
                                     str(exc)[:300])
             return {}
 
+        if market_wide:
+            try:
+                sweep = await self.api.get_news(
+                    [], now - timedelta(hours=min(lookback_hours, 4)), now,
+                    limit=market_wide_limit)
+                seen_ids = {str(r.get("id")) for r in raw}
+                raw = raw + [r for r in sweep
+                             if str(r.get("id")) not in seen_ids]
+            except AlpacaError as exc:
+                await self.db.log_event(
+                    "WARN", "news", "NEWS_SWEEP_FAILED", str(exc)[:300])
+
         self.stats.fetched = len(raw)
         items = [i for i in (normalize(r, now) for r in raw) if i]
         self.stats.normalized = len(items)
@@ -349,6 +374,7 @@ class NewsIntelligence:
 
         await self._persist_items(items)
 
+        requested = {s.upper() for s in symbols}
         events: dict[str, list[IntelligenceEvent]] = {}
         for members in clusters.values():
             # The originating copy carries the story; later copies are
@@ -358,7 +384,7 @@ class NewsIntelligence:
                             for i in members)
 
             for symbol in primary.symbols:
-                if symbol not in symbols:
+                if symbol not in requested and not include_offcore:
                     continue
                 event = self._score(primary, members, symbol, has_tier1,
                                     price_returns.get(symbol), now)
@@ -486,8 +512,11 @@ class NewsIntelligence:
                     e.materiality_score, e.surprise_score,
                     e.market_confirmation_score, e.catalyst_score,
                     1 if e.provisional else 0,
-                    str(e.extracted_facts).replace("'", '"'),
-                    str(e.evidence_urls).replace("'", '"'),
+                    # json.dumps, not str().replace: a headline containing
+                    # an apostrophe (Barron's, "won't") produced invalid
+                    # JSON in the column.
+                    json.dumps(e.extracted_facts),
+                    json.dumps(e.evidence_urls),
                     iso_utc(e.created_at)))
         if rows:
             await self.db.executemany(

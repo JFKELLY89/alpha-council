@@ -343,6 +343,7 @@ models:
   scenario_generator:  {provider: openai,    model: gpt-5.6-luna,    reasoning: medium, evidence_cap_tokens: 3500}
   lessons:             {provider: openai,    model: gpt-5.6-sol,     reasoning: high,   evidence_cap_tokens: 12000}
   briefing:            {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
+  alpha_evolution:     {provider: openai,    model: gpt-5.6-sol,     reasoning: high,   evidence_cap_tokens: 10000}
 
 model_prices:                      # USD per million tokens
   gpt-5.6-luna:    {input: 0.20, output: 1.20}
@@ -394,3 +395,54 @@ rate_limits:
   max_retries: 4
   backoff_base_seconds: 1.0
   backoff_max_seconds: 30.0
+
+# ----------------------------------------------------------------------
+# SEC EDGAR collector (v2.4 §10.1 - active-universe polling)
+# ----------------------------------------------------------------------
+sec:
+  enabled: true
+  lookback_hours: 24
+  max_symbols_per_cycle: 40      # rotating window; full set every few scans
+  cooldown_seconds: 600          # per-symbol re-poll floor
+
+# ----------------------------------------------------------------------
+# Alpha Evolution (v2.5 §16) - advisory + shadow only during competition
+# ----------------------------------------------------------------------
+alpha_evolution:
+  enabled: true
+  competition_mode: true
+  auto_promotion_enabled: false        # constitutional; promote() also
+  operator_approval_required: true     # refuses without operator approval
+  max_active_challengers: 1
+  max_changes_per_challenger: 3
+
+  competition:
+    min_observations_to_propose: 8
+    min_observations_to_recommend_promotion: 12
+    min_sessions_to_recommend_promotion: 2
+
+  post_competition:
+    min_challenger_closed_trades: 25
+    min_challenger_sessions: 10
+    min_champion_closed_trades: 25
+    min_holdout_trades: 10
+    max_single_trade_pnl_contribution_pct: 35
+
+  hysteresis:
+    max_weight_change_per_version_pct: 10
+    max_threshold_change_per_version_pct: 10
+    min_version_lifetime_sessions: 5
+    min_days_between_promotions: 5
+
+  # Prefix-matched against ParameterChange.parameter_path. Anything under
+  # these is rejected by change_validator before storage.
+  immutable_paths:
+    - hard.
+    - paper_only
+    - risk.
+    - execution.
+    - liquidity.
+    - liquidity_floor.
+    - budget.
+    - rate_limits.
+    - activity_target.

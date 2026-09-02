@@ -30,9 +30,11 @@ from alpha_council.db.engine import Database
 from alpha_council.execution.order_manager import ExecutionOutcome, OrderManager
 from alpha_council.journal.trade_journal import TradeJournal
 from alpha_council.models.enums import (
+    CandidateTrack,
     DataConfidence,
     Direction,
     ExitReason,
+    MarkMethod,
     StrategyType,
 )
 from alpha_council.models.trading import InvalidationRule, OptionStructure
@@ -56,6 +58,7 @@ class MonitoredPosition:
     opened_at: datetime
     invalidation: list[InvalidationRule] = field(default_factory=list)
     horizon_days: int = 5
+    track: CandidateTrack = CandidateTrack.MOMENTUM
 
     @property
     def direction(self) -> Direction:
@@ -224,13 +227,20 @@ class PositionMonitor:
 
     def __init__(self, db: Database, market: MarketDataService,
                  orders: OrderManager, journal: TradeJournal,
-                 config: dict[str, Any], risk_config: dict[str, Any]):
+                 config: dict[str, Any], risk_config: dict[str, Any],
+                 marks: Any = None, shadows: Any = None):
         self.db = db
         self.market = market
         self.orders = orders
         self.journal = journal
         self.config = config
         self.risk_config = risk_config
+        # Optional collaborators. marks supplies CURRENT spread values so
+        # closes are priced off live quotes and advisory triggers can fire;
+        # shadows lets a real close freeze the counterfactual variants at
+        # the same moment, so attribution stops drifting after exit.
+        self.marks = marks
+        self.shadows = shadows
         self._positions: dict[str, MonitoredPosition] = {}
 
     def track(self, position: MonitoredPosition) -> None:
@@ -248,13 +258,33 @@ class PositionMonitor:
 
         A monitor that forgets its positions on restart is worse than no
         monitor: the position is live and nothing is watching it.
+
+        The join goes through risk_evaluations.structure_id: a decision
+        stores up to FIVE structures, and joining on decision_id alone
+        restored an arbitrary one — wrong strikes for the underlying-target
+        exit. The risk row records which structure was actually approved.
         """
         rows = await self.db.fetchall(
             "SELECT t.decision_id, t.qty, t.entry_debit, t.opened_at, "
-            "t.invalidation_json, s.raw_json AS structure_json "
+            "t.invalidation_json, t.candidate_track, "
+            "s.raw_json AS structure_json "
+            "FROM trade_journal t "
+            "JOIN risk_evaluations r ON r.decision_id = t.decision_id "
+            "JOIN option_structures s ON s.structure_id = r.structure_id "
+            "WHERE t.status='OPEN'")
+        matched = {r["decision_id"] for r in rows}
+        # Defensive fallback for rows with no risk evaluation (should not
+        # happen for an OPEN trade, but a live position must never be
+        # silently unwatched because a join came up empty).
+        orphans = await self.db.fetchall(
+            "SELECT t.decision_id, t.qty, t.entry_debit, t.opened_at, "
+            "t.invalidation_json, t.candidate_track, "
+            "s.raw_json AS structure_json "
             "FROM trade_journal t "
             "LEFT JOIN option_structures s ON s.decision_id = t.decision_id "
             "WHERE t.status='OPEN'")
+        rows = list(rows) + [r for r in orphans
+                             if r["decision_id"] not in matched]
 
         restored = 0
         for row in rows:
@@ -274,12 +304,17 @@ class PositionMonitor:
 
             from alpha_council.utils.time import parse_alpaca_ts
 
+            try:
+                track = CandidateTrack(row.get("candidate_track")
+                                       or "MOMENTUM")
+            except ValueError:
+                track = CandidateTrack.MOMENTUM
             self.track(MonitoredPosition(
                 decision_id=row["decision_id"], symbol=structure.symbol,
                 structure=structure, qty=int(row["qty"] or 0),
                 entry_debit=float(row["entry_debit"] or 0.0),
                 opened_at=parse_alpaca_ts(row["opened_at"]) or utc_now(),
-                invalidation=rules))
+                invalidation=rules, track=track))
             restored += 1
         return restored
 
@@ -313,17 +348,58 @@ class PositionMonitor:
                 continue
 
             confidence = self._equity_confidence(snap.quote_age)
+            vwap = await self._session_vwap(position.symbol)
+
+            # Advisory option triggers (§18 secondary). The mark source
+            # enforces its own lag and drift bounds, so a mark it returns
+            # is at worst MEDIUM; no mark means the triggers stay off and
+            # the underlying rules carry the position, as designed.
+            spread_mark: float | None = None
+            option_confidence = DataConfidence.BLOCKED
+            if self.marks is not None:
+                try:
+                    spread_mark = await self.marks.spread_mark(
+                        position.structure, MarkMethod.ADJUSTED_MID)
+                except Exception:  # noqa: BLE001 - advisory only
+                    spread_mark = None
+                if spread_mark is not None:
+                    option_confidence = DataConfidence.MEDIUM
+
             decision = evaluate_exit(
                 position, underlying, now, self.risk_config,
-                spread_mark=None, option_confidence=DataConfidence.BLOCKED,
-                vwap=None)
+                spread_mark=spread_mark,
+                option_confidence=option_confidence,
+                vwap=vwap)
 
             decisions.append((position.decision_id, decision))
-            await self._record_snapshot(position, underlying, decision, now)
+            await self._record_snapshot(position, underlying, decision, now,
+                                        equity_confidence=confidence)
 
             if decision.should_exit and execute:
                 await self.close(position, decision, now)
         return decisions
+
+    async def _session_vwap(self, symbol: str) -> float | None:
+        """Session VWAP from stored RTH bars, for VWAP invalidation rules.
+
+        Bars refresh on the scan cadence, so this can lag by minutes; a
+        slightly stale VWAP still beats silently skipping every VWAP rule
+        the PM wrote, which is what passing None did.
+        """
+        try:
+            bars = await self.market.load_bars(symbol, limit=100)
+        except Exception:  # noqa: BLE001 - advisory input only
+            return None
+        if not bars:
+            return None
+        from alpha_council.quant.indicators import session_vwap, split_session
+
+        session_bars, _ = split_session(bars)
+        # Only trust a VWAP computed from the CURRENT session's bars.
+        if not session_bars or to_et(session_bars[-1].timestamp).date() \
+                != to_et(utc_now()).date():
+            return None
+        return session_vwap(session_bars)
 
     def _equity_confidence(self, age: float | None) -> DataConfidence:
         cfg = self.config.get("equity", {})
@@ -337,7 +413,9 @@ class PositionMonitor:
 
     async def _record_snapshot(self, position: MonitoredPosition,
                                underlying: float, decision: ExitDecision,
-                               now: datetime) -> None:
+                               now: datetime,
+                               equity_confidence: DataConfidence
+                               = DataConfidence.HIGH) -> None:
         from alpha_council.utils.ids import new_uuid
 
         await self.db.execute(
@@ -347,6 +425,7 @@ class PositionMonitor:
             (new_uuid(), iso_utc(now), position.symbol, position.qty, None,
              position.entry_debit * 100 * position.qty, None, None,
              json.dumps({"underlying": underlying,
+                         "equity_confidence": str(equity_confidence),
                          "dte": position.dte(now),
                          "exit_reason": str(decision.reason)
                          if decision.reason else None,
@@ -355,7 +434,13 @@ class PositionMonitor:
     async def close(self, position: MonitoredPosition,
                     decision: ExitDecision,
                     now: datetime | None = None) -> ExecutionOutcome:
-        """Submit a closing order and journal the result."""
+        """Submit a closing order and journal the result.
+
+        Closing a debit vertical is a net CREDIT. The walk demands a credit
+        near the current adjusted mid and concedes toward the conservative
+        exit — priced off CURRENT marks when the mark source can supply
+        them, entry-time quotes only as a fallback.
+        """
         now = now or utc_now()
         await self.db.log_event(
             "INFO", "position_monitor", "EXIT_TRIGGERED",
@@ -363,15 +448,47 @@ class PositionMonitor:
             {"reason": str(decision.reason), "advisory": decision.advisory},
             decision_id=position.decision_id)
 
+        close_mid: float | None = None
+        close_conservative: float | None = None
+        if self.marks is not None:
+            try:
+                close_mid = await self.marks.spread_mark(
+                    position.structure, MarkMethod.ADJUSTED_MID)
+                close_conservative = await self.marks.spread_mark(
+                    position.structure, MarkMethod.CONSERVATIVE)
+            except Exception:  # noqa: BLE001 - fall back to entry quotes
+                pass
+
         outcome = await self.orders.execute_with_walk(
             position.structure, f"{position.decision_id}_x", position.qty,
-            max_allowed_debit=position.structure.natural_debit, closing=True)
+            max_allowed_debit=position.structure.natural_debit, closing=True,
+            close_adjusted_mid=close_mid,
+            close_conservative=close_conservative)
+
+        await self.orders.record_calibration(
+            outcome, position.structure,
+            track=position.track, direction=position.direction,
+            underlying_at_submit=position.structure.underlying_price or 0.01,
+            closing=True, close_adjusted_mid=close_mid,
+            close_conservative=close_conservative,
+            decision_id=position.decision_id)
 
         if outcome.filled and outcome.fill_debit is not None:
             await self.journal.close_trade(
                 position.decision_id, exit_credit=outcome.fill_debit,
                 reason=decision.reason or ExitReason.MANUAL, closed_at=now)
             self.untrack(position.decision_id)
+            if self.shadows is not None:
+                # Freeze the counterfactual variants at the same moment,
+                # with the EXECUTED variant at the actual exit credit.
+                try:
+                    await self.shadows.close_decision(
+                        position.decision_id, outcome.fill_debit, now)
+                except Exception as exc:  # noqa: BLE001
+                    await self.db.log_event(
+                        "ERROR", "position_monitor", "SHADOW_CLOSE_FAILED",
+                        f"{position.decision_id}: {exc}"[:300],
+                        decision_id=position.decision_id)
         else:
             # An unfilled exit is a live risk, not a closed book. The
             # position stays tracked and will be retried next poll.

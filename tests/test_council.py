@@ -306,11 +306,28 @@ def test_revision_must_be_marked_revision_one():
 
 
 def test_red_team_cap_is_a_ceiling_not_a_floor():
-    outcome = _run(_council(_full_script(), {"red_team": _review(max_risk=1.5)}))
+    """The cap binds only on MODIFY. A PASS carries a recommendation the
+    shadow book has no variant for; honouring it would shrink the executed
+    size through a channel the attribution cannot decompose."""
+    script = _full_script(pm_revision=_proposal(revision=1, rank=3,
+                                                risk=1.25))
+    outcome = _run(_council(script,
+                            {"red_team": _review(Verdict.MODIFY,
+                                                 max_risk=1.5)}))
     assert effective_risk_pct(outcome) == pytest.approx(1.25)  # PM asked less
 
-    tight = _run(_council(_full_script(), {"red_team": _review(max_risk=0.6)}))
+    tight = _run(_council(script,
+                          {"red_team": _review(Verdict.MODIFY,
+                                               max_risk=0.6)}))
     assert effective_risk_pct(tight) == pytest.approx(0.6)
+
+
+def test_pass_verdict_does_not_cap_risk():
+    """On PASS nothing changed, so nothing may silently resize the trade."""
+    outcome = _run(_council(_full_script(),
+                            {"red_team": _review(Verdict.PASS,
+                                                 max_risk=0.6)}))
+    assert effective_risk_pct(outcome) == pytest.approx(1.25)
 
 
 # ======================================================================

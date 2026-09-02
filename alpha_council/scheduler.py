@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Any, Awaitable, Callable, Sequence
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -43,8 +43,10 @@ from alpha_council.orchestrator import (
     SessionSummary,
     TierManager,
 )
+from alpha_council.models.enums import DiscoverySource
+from alpha_council.quant.discovery import Injection
 from alpha_council.quant.scanner import FunnelScanner
-from alpha_council.risk.constitution import PortfolioState
+from alpha_council.risk.constitution import PortfolioState, sector_of
 from alpha_council.utils.ids import candidate_id as make_candidate_id
 from alpha_council.utils.ids import scan_id as make_scan_id
 from alpha_council.utils.time import (
@@ -70,12 +72,16 @@ class SchedulerConfig:
     monitor_seconds: int = 120
     event_loop_seconds: int = 300
     new_trade_cutoff: str = "15:35"
+    briefing_time: str = "08:45"
     lessons_time: str = "16:15"
     flatten_time: str = "15:45"
 
     @classmethod
-    def from_config(cls, scoring: dict[str, Any]) -> "SchedulerConfig":
+    def from_config(cls, scoring: dict[str, Any],
+                    risk_cfg: dict[str, Any] | None = None
+                    ) -> "SchedulerConfig":
         s = scoring.get("schedule", {})
+        hard = (risk_cfg or {}).get("hard", {})
         return cls(
             scan_times=list(s.get("full_scans_et", cls().scan_times)),
             discovery_refresh=s.get("discovery_refresh_et", "09:35"),
@@ -83,6 +89,11 @@ class SchedulerConfig:
             tier_checks=list(s.get("tier_check_et", ["12:30", "14:15"])),
             monitor_seconds=int(s.get("position_monitor_seconds", 120)),
             event_loop_seconds=int(s.get("event_loop_seconds", 300)),
+            # The cutoff job and the Risk Constitution's RISK_AFTER_CUTOFF
+            # gate must agree; two hardcoded copies had already drifted
+            # (15:35 here, whatever risk_constitution.yaml said there).
+            new_trade_cutoff=hard.get("new_trade_cutoff_et", "15:20"),
+            briefing_time=s.get("briefing_et", "08:45"),
             lessons_time=s.get("lessons_et", "16:15"),
         )
 
@@ -97,6 +108,10 @@ class TradingSession:
                  config: dict[str, Any], risk_config: dict[str, Any],
                  universe_config: dict[str, Any], control: Any = None,
                  news: NewsIntelligence | None = None,
+                 sec: Any = None,
+                 rejected_shadows: Any = None,
+                 evolution: Any = None,
+                 premarket: Any = None,
                  max_trades: int | None = None, dry_run: bool = False):
         self.db = db
         self.scanner = scanner
@@ -104,6 +119,7 @@ class TradingSession:
         self.tiers = tiers
         self.monitor = monitor
         self.shadows = shadows
+        self.rejected_shadows = rejected_shadows
         self.journal = journal
         self.orders = orders
         self.market = market
@@ -111,6 +127,10 @@ class TradingSession:
         self.budget = budget
         self.control = control
         self.news = news
+        self.sec = sec
+        self.evolution = evolution
+        self.premarket = premarket
+        self.session_briefing: str | None = None
         self.config = config
         self.risk_config = risk_config
         self.universe_config = universe_config
@@ -150,10 +170,67 @@ class TradingSession:
 
     # ---- jobs ---------------------------------------------------------
 
+    async def morning_reset(self) -> None:
+        """New trading day: fresh tier, fresh session state.
+
+        A process left running overnight otherwise carried yesterday's
+        cutoff_reached and Tier 3 into today's open — the ladder never
+        reset because nothing called start_session after startup.
+        """
+        session_id = f"sess_{to_et(utc_now()):%Y%m%d}"
+        if self.summary.session_id == session_id:
+            return                          # same day; nothing to reset
+        self.tiers.start_session()
+        self.summary = SessionSummary(session_id=session_id,
+                                      started_at=utc_now())
+        self.cutoff_reached = False
+        await self.budget.load()            # refresh daily spend windows
+        await self.log("INFO", "MORNING_RESET",
+                       f"session {session_id} started at tier "
+                       f"{self.tiers.tier}")
+
     async def refresh_discovery(self) -> None:
+        await self.morning_reset()
         result = await self.screeners.probe_entitlements()
         await self.log("INFO", "DISCOVERY_REFRESH",
                        "screener entitlements probed", result)
+
+    async def premarket_brief(self) -> None:
+        """v2.5 §8: one session-context call. Context only, never scoring.
+
+        Idempotent per session date (the strategist reuses a stored brief),
+        so an intraday restart re-loads rather than re-spends.
+        """
+        if self.premarket is None:
+            return
+        await self.morning_reset()
+        try:
+            brief = await self.premarket.daily_brief(
+                session_id=self.summary.session_id)
+        except Exception as exc:  # noqa: BLE001 - normal scan continues
+            await self.log("WARN", "PREMARKET_FAILED", str(exc)[:200])
+            return
+        if brief is not None:
+            self.session_briefing = brief.as_context()
+            await self.log("INFO", "PREMARKET_BRIEF",
+                           f"{brief.session_bias}, "
+                           f"confidence {brief.confidence:.2f}")
+
+    async def _councils_remaining_today(self) -> int:
+        """Enforce the tier's max_councils_per_day, which nothing did.
+
+        Counted from decisions created today (ET), so a restart cannot
+        reset the cap.
+        """
+        cap = int(self.tiers.tier_config().get("max_councils_per_day", 12))
+        day_start_et = to_et(utc_now()).replace(hour=0, minute=0, second=0,
+                                                microsecond=0)
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS n FROM decisions WHERE created_at >= ?",
+            (day_start_et.astimezone(timezone.utc).isoformat(
+                timespec="microseconds"),))
+        used = int((row or {}).get("n") or 0)
+        return max(0, cap - used)
 
     async def full_scan(self) -> None:
         """One complete funnel pass, then councils on the survivors."""
@@ -163,10 +240,12 @@ class TradingSession:
             return
 
         async with self._scan_lock:
+            await self.morning_reset()
             scan_id = make_scan_id()
             self.summary.scans += 1
-            rejections = RejectionLog(self.db, self.tiers.config_version,
-                                      self.tiers.tier)
+            rejections = RejectionLog(
+                self.db, self.tiers.config_version, self.tiers.tier,
+                rejected_shadows=self.rejected_shadows)
 
             portfolio = await self._portfolio_state()
             if portfolio is None:
@@ -182,6 +261,12 @@ class TradingSession:
             symbols = await self.scanner.discovery.refresh(now=now)
             intel, benchmark_return, _, raw_events = \
                 await self._gather_intelligence(symbols, now)
+            injected = self._inject_offcore_news(symbols, intel, raw_events,
+                                                 now)
+            if injected:
+                await self.log("INFO", "NEWS_INJECTION",
+                               f"{injected} off-universe symbol(s) injected "
+                               "from material news", {"scan_id": scan_id})
 
             result = await self.scanner.run(
                 scan_id, tier=self.tiers.tier, intel_by_symbol=intel,
@@ -202,13 +287,21 @@ class TradingSession:
                             "tier": self.tiers.tier})
 
             allowed, reason = self.can_open()
-            max_councils = int(
+            per_scan = int(
                 self.tiers.tier_config().get("max_councils_per_scan", 3))
+            remaining_today = await self._councils_remaining_today()
+            max_councils = min(per_scan, remaining_today)
+            if remaining_today <= 0:
+                await self.log("WARN", "COUNCIL_DAY_CAP",
+                               "daily council cap reached; scan recorded, "
+                               "no councils started")
 
+            councils_started = 0
             for candidate in result.final[:max_councils]:
                 structures = result.structures_for(candidate.symbol)
                 if not structures:
                     continue
+                councils_started += 1
 
                 self.summary.candidates_evaluated += 1
                 builder = EvidenceBuilder(
@@ -217,7 +310,8 @@ class TradingSession:
                     structures=structures,
                     portfolio_state=self._portfolio_summary(portfolio),
                     market_summary={"tier": self.tiers.tier},
-                    scheduled_events=[])
+                    scheduled_events=[],
+                    session_briefing=self.session_briefing)
 
                 # Must match the ID the scanner wrote into candidate_scores,
                 # or decisions.candidate_id violates its foreign key after
@@ -237,9 +331,47 @@ class TradingSession:
                     allowed, reason = self.can_open()
 
             written = await rejections.flush()
+            # The snapshot was persisted before the councils ran; without
+            # this update every funnel row claimed zero councils.
+            await self.db.execute(
+                "UPDATE funnel_snapshots SET councils_started=? "
+                "WHERE scan_id=?", (councils_started, scan_id))
             await self.log("INFO", "SCAN_REJECTIONS",
                            f"{written} gate rejections recorded",
-                           {"scan_id": scan_id})
+                           {"scan_id": scan_id,
+                            "councils_started": councils_started})
+
+    def _inject_offcore_news(self, universe_symbols: Sequence[str],
+                             intel: dict[str, IntelSummary],
+                             raw_events: dict[str, list[Any]],
+                             now: datetime) -> int:
+        """Spec §10.2: fresh material news may inject an off-universe symbol.
+
+        The injection only enters the pool; every eligibility, data-density
+        and quality gate still applies downstream. No headline can generate
+        an order. Returns the number of symbols admitted.
+        """
+        if not self.config.get("discovery", {}).get(
+                "event_injection_enabled", True):
+            return 0
+        universe = {s.upper() for s in universe_symbols}
+        injected = 0
+        for symbol, summary in intel.items():
+            sym = symbol.upper()
+            if sym in universe or not summary.has_material_catalyst:
+                continue
+            events = raw_events.get(symbol, [])
+            headline = ""
+            if events:
+                facts = getattr(events[0], "extracted_facts", None) or [""]
+                headline = str(facts[0])[:80]
+            admitted = self.scanner.discovery.universe.inject(
+                Injection(symbol=sym, source=DiscoverySource.ALPACA_NEWS,
+                          reason=f"news injection: {headline}"
+                          if headline else "material news"), now)
+            if admitted:
+                injected += 1
+        return injected
 
     async def breadth_check(self) -> None:
         """Widen the search. Never touches quality thresholds."""
@@ -276,7 +408,8 @@ class TradingSession:
         """Mark every open shadow variant on one schedule.
 
         Same cycle, same method, every variant, or the attribution
-        arithmetic compares things that were valued differently.
+        arithmetic compares things that were valued differently. Rejected
+        shadows ride the same cycle for the same reason.
         """
         rows = await self.db.fetchall(
             "SELECT DISTINCT decision_id FROM shadow_trades "
@@ -288,6 +421,13 @@ class TradingSession:
             result = self.shadows.compute(decision_id, now)
             if result is not None:
                 await self.shadows.persist(result)
+
+        if self.rejected_shadows is not None:
+            try:
+                await self.rejected_shadows.mark_open(now)
+            except Exception as exc:  # noqa: BLE001 - measurement only
+                await self.log("WARN", "REJECTED_SHADOW_MARK_FAILED",
+                               str(exc)[:200])
 
     async def enforce_cutoff(self) -> None:
         self.cutoff_reached = True
@@ -312,6 +452,19 @@ class TradingSession:
                        f"${report['cost_usd']:.4f} spend",
                        {"report": report, "performance": performance,
                         "budget": self.budget.summary()})
+
+        # v2.5 §21: lessons -> at most one challenger proposal -> shadow
+        # evaluation -> deterministic performance -> promotion
+        # recommendation. Non-load-bearing: every step is fenced inside
+        # the service, and a total failure costs the evolution cycle, not
+        # the session report above it.
+        if self.evolution is not None:
+            try:
+                summary = await self.evolution.post_close_cycle()
+                await self.log("INFO", "EVOLUTION_CYCLE", str(summary)[:300])
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "EVOLUTION_CYCLE_FAILED",
+                               str(exc)[:200])
 
     # ---- helpers ------------------------------------------------------
 
@@ -347,15 +500,37 @@ class TradingSession:
         if self.news is None:
             return empty, benchmark, returns, {}
 
+        disc_cfg = self.config.get("discovery", {})
         try:
             events = await self.news.collect(
-                list(symbols), lookback_hours=int(
-                    self.config.get("discovery", {}).get(
-                        "news_lookback_hours", 8)),
-                price_returns=returns, now=now)
+                list(symbols),
+                lookback_hours=int(disc_cfg.get("news_lookback_hours", 8)),
+                price_returns=returns, now=now,
+                include_offcore=bool(
+                    disc_cfg.get("event_injection_enabled", True)),
+                market_wide=bool(
+                    disc_cfg.get("event_injection_enabled", True)))
         except Exception as exc:  # noqa: BLE001
             await self.log("WARN", "INTEL_COLLECT_FAILED", str(exc)[:200])
             return empty, benchmark, returns, {}
+
+        # SEC EDGAR rides the same sweep (§10.1). A collector failure costs
+        # SEC coverage for one cycle, never the scan.
+        if self.sec is not None:
+            try:
+                sec_events = await self.sec.collect(
+                    list(symbols),
+                    lookback_hours=int(self.config.get("sec", {}).get(
+                        "lookback_hours", 24)),
+                    price_returns=returns, now=now)
+                for symbol, evs in sec_events.items():
+                    events.setdefault(symbol, []).extend(evs)
+                if self.sec.stats.events or self.sec.stats.errors:
+                    await self.log("INFO", "SEC_COLLECTED",
+                                   f"{self.sec.stats.events} filing events",
+                                   self.sec.stats.as_dict())
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "SEC_COLLECT_FAILED", str(exc)[:200])
 
         intel = {symbol: summarize_intel(evs)
                  for symbol, evs in events.items() if evs}
@@ -401,14 +576,26 @@ class TradingSession:
         await self.db.set_state("day_start_equity", day_start)
 
         open_rows = await self.db.fetchall(
-            "SELECT decision_id, qty, entry_debit FROM trade_journal "
-            "WHERE status = 'OPEN'")
+            "SELECT t.decision_id, t.qty, t.entry_debit, d.symbol "
+            "FROM trade_journal t "
+            "LEFT JOIN decisions d ON d.decision_id = t.decision_id "
+            "WHERE t.status = 'OPEN'")
         open_risk = sum(float(r["entry_debit"] or 0) * 100
                         * int(r["qty"] or 0) for r in open_rows)
+
+        # Per-sector open risk. Without it the 4% sector cap compared every
+        # new trade against zero and concentration never accumulated.
+        sector_map = self.risk_config.get("sectors", {})
+        sector_risk: dict[str, float] = {}
+        for r in open_rows:
+            sector = sector_of(str(r.get("symbol") or ""), sector_map)
+            dollars = float(r["entry_debit"] or 0) * 100 * int(r["qty"] or 0)
+            sector_risk[sector] = sector_risk.get(sector, 0.0) + dollars
 
         return PortfolioState(
             equity=equity, day_start_equity=day_start, peak_equity=peak,
             open_risk_dollars=open_risk,
+            sector_risk_dollars=sector_risk,
             open_position_count=len(open_rows),
             open_decision_ids={r["decision_id"] for r in open_rows})
 
@@ -441,6 +628,9 @@ def build_scheduler(session: TradingSession,
         moment = parse_et_time(hhmm)
         return CronTrigger(day_of_week="mon-fri", hour=moment.hour,
                            minute=moment.minute, timezone=ET)
+
+    add(session.premarket_brief, cron(config.briefing_time),
+        "premarket_brief")
 
     add(session.refresh_discovery, cron(config.discovery_refresh),
         "discovery_refresh")

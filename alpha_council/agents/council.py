@@ -463,12 +463,15 @@ def effective_risk_pct(outcome: CouncilOutcome) -> float:
     """Risk the Risk Constitution should size against.
 
     The Red Team's recommendation is a ceiling, never a floor: it can only
-    reduce what the PM asked for.
+    reduce what the PM asked for — and only when the verdict is MODIFY.
+    On PASS nothing changed and no CLAUDE_MODIFIED shadow variant exists,
+    so applying the number anyway would shrink the executed size through a
+    channel the attribution decomposition cannot attribute to anyone.
     """
     proposal = outcome.final_proposal
     if proposal is None or not proposal.trade:
         return 0.0
     requested = proposal.desired_portfolio_risk_pct
-    if outcome.review is None:
+    if outcome.review is None or outcome.review.verdict is not Verdict.MODIFY:
         return requested
     return min(requested, outcome.review.recommended_max_risk_pct)

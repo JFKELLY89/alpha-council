@@ -68,6 +68,23 @@ class SymbolSnapshot:
     def quote_age(self) -> float | None:
         return self.quote.quote_lag_seconds
 
+    def signal_price(self,
+                     prefer_last_above_spread_pct: float = 0.010
+                     ) -> float | None:
+        """Price for signal/exit evaluation.
+
+        Delegates to the quote's wide-spread-aware logic, then falls back to
+        the latest minute-bar close. The position monitor and the live mark
+        source call this on the snapshot itself; without it every monitoring
+        poll died with AttributeError and no exit ever fired.
+        """
+        price = self.quote.signal_price(prefer_last_above_spread_pct)
+        if price is not None:
+            return price
+        if self.minute_bar_close and self.minute_bar_close > 0:
+            return self.minute_bar_close
+        return None
+
     @property
     def day_open(self) -> float | None:
         return (self.daily_bar or {}).get("o")
@@ -360,9 +377,11 @@ class MarketDataService:
 
         if current <= 0 or len(historical) < 5:
             return None
-        baseline = median_or_none(
-            sorted(historical.values(), key=lambda _: 0)[-lookback_sessions:]
-            if len(historical) > lookback_sessions else list(historical.values()))
+        # Most recent N sessions, ordered by date. The previous
+        # constant-key sort happened to preserve insertion order but read
+        # as a no-op and depended on it silently.
+        by_date = [volume for _, volume in sorted(historical.items())]
+        baseline = median_or_none(by_date[-lookback_sessions:])
         if not baseline or baseline <= 0:
             return None
         return current / baseline

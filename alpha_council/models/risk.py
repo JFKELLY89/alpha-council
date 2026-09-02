@@ -34,6 +34,11 @@ class RiskEvaluation(StrictModel):
     approved_qty: int = Field(ge=0)
     requested_max_loss: float = Field(ge=0)
     approved_max_loss: float = Field(ge=0)
+    # Dollars of risk the binding cap actually granted, before flooring to
+    # whole spreads. The limit walk prices against budget/qty; against
+    # approved_max_loss/qty the ceiling equals the first price and the walk
+    # degenerates to one attempt.
+    approved_risk_budget: float = Field(default=0.0, ge=0)
 
     total_open_risk_pct_after: float = Field(ge=0)
     sector_risk_pct_after: float = Field(ge=0)
@@ -64,6 +69,14 @@ class RiskEvaluation(StrictModel):
         if self.decision is RiskDecision.HALT:
             if not any(v.severity is Severity.HALT for v in self.violations):
                 raise ValueError("HALT requires a HALT-severity violation")
+        if (self.approved_risk_budget > 0
+                and self.decision in (RiskDecision.APPROVE,
+                                      RiskDecision.RESIZE)
+                and self.approved_risk_budget + 1e-6 < self.approved_max_loss):
+            raise ValueError(
+                f"approved_risk_budget {self.approved_risk_budget} is below "
+                f"approved_max_loss {self.approved_max_loss}; the budget is "
+                "the cap the quantity was floored from and cannot be smaller")
         return self
 
     @property

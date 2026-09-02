@@ -28,7 +28,12 @@ class ExecutionIntent(StrictModel):
     order_class: Literal["mleg"] = "mleg"
     order_type: Literal["limit"] = "limit"
     time_in_force: Literal["day"] = "day"
+    # Always the magnitude. For an opening order this is the net debit paid;
+    # for a closing order it is the net credit demanded, and the Alpaca
+    # payload carries it with a negative sign (mleg convention: positive
+    # limit = net debit, negative limit = net credit).
     limit_debit: float = Field(gt=0)
+    limit_is_credit: bool = False
     attempt: int = Field(default=1, ge=1, le=3)
     legs: list[OptionLeg] = Field(min_length=2, max_length=2)
 
@@ -49,13 +54,30 @@ class ExecutionIntent(StrictModel):
             raise ValueError(f"legs mix opening and closing intents: {intents}")
         return self
 
+    @model_validator(mode="after")
+    def _credit_flag_matches_intents(self) -> "ExecutionIntent":
+        """Closing a debit vertical is a net credit; opening is a net debit.
+
+        Submitting a closing combo with a positive (debit) limit is a
+        marketable order through the market — it can fill at any credit,
+        including one near zero.
+        """
+        closing = all(leg.position_intent.endswith("close")
+                      for leg in self.legs)
+        if closing != self.limit_is_credit:
+            raise ValueError(
+                f"limit_is_credit={self.limit_is_credit} contradicts leg "
+                f"intents {[leg.position_intent for leg in self.legs]}")
+        return self
+
     def to_alpaca_payload(self) -> dict[str, Any]:
-        """A positive mleg limit price represents a debit."""
+        """Positive mleg limit price = net debit; negative = net credit."""
+        signed = -self.limit_debit if self.limit_is_credit else self.limit_debit
         return {
             "order_class": self.order_class,
             "qty": str(self.qty),
             "type": self.order_type,
-            "limit_price": f"{self.limit_debit:.2f}",
+            "limit_price": f"{signed:.2f}",
             "time_in_force": self.time_in_force,
             "client_order_id": self.client_order_id,
             "legs": [
