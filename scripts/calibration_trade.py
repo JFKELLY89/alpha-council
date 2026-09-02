@@ -280,8 +280,9 @@ async def run(args: argparse.Namespace) -> int:
                                     config_version, "CORE",
                                     CandidateTrack.CALIBRATION)
         await journal.record_structures(decision, [structure], candidate_id)
-        await journal.record_risk(evaluation, f"prop_{decision[-8:]}_r0",
-                                  structure.structure_id)
+        # proposal_id is None: a lifecycle test has no PM proposal, and a
+        # phantom id trips the trade_proposals foreign key.
+        await journal.record_risk(evaluation, None, structure.structure_id)
 
         # §17.4: reprice from live quotes immediately before submission.
         refresh = await presubmit.refresh(structure, tier_cfg)

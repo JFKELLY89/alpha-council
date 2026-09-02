@@ -111,12 +111,23 @@ def parse_occ_symbol(occ: str) -> tuple[str, date, str, float] | None:
 class ChainService:
     """Fetches and normalizes option chains. One cache per underlying."""
 
+    # Open interest is prior-session information; refetching it with every
+    # 60-second chain cycle would spend requests on a number that changes
+    # once a day.
+    OI_CACHE_SECONDS = 900
+
     def __init__(self, api: AlpacaRestClient, market: MarketDataService,
                  cache_seconds: int = 60):
         self.api = api
         self.market = market
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
+        # symbol -> (fetched_at, occ -> (open_interest, oi_date) | None)
+        # None means the contracts endpoint was unavailable: degraded, the
+        # OI gate stands down for that fetch rather than zeroing the chain.
+        self._oi_cache: dict[str, tuple[datetime,
+                                        dict[str, tuple[int, str | None]]
+                                        | None]] = {}
         self.fetches = 0
         self.cache_hits = 0
 
@@ -137,6 +148,58 @@ class ChainService:
         self._cache[symbol] = (now, payload)
         return payload
 
+    async def _open_interest_map(self, symbol: str, filters: ChainFilters,
+                                 now: datetime
+                                 ) -> dict[str, tuple[int, str | None]] | None:
+        """OCC symbol -> (open_interest, open_interest_date).
+
+        Measured 2026-09-02 09:56 ET on the live account: the Indicative
+        market-data snapshots carry NO open-interest field at all (12,746
+        SPY contracts, zero with an OI key), so the §13.1 OI gate can only
+        be evaluated from the Trading API contracts endpoint — which is
+        the source §5.2's probe confirmed OI from in the first place.
+
+        Returns None when the endpoint is unavailable: the OI gate stands
+        down for that fetch (logged as degradation) instead of rejecting
+        every contract on a data outage.
+        """
+        cached = self._oi_cache.get(symbol)
+        if cached and (now - cached[0]).total_seconds() < self.OI_CACHE_SECONDS:
+            return cached[1]
+
+        today = to_et(now).date()
+        try:
+            contracts = await self.api.get_option_contracts(
+                symbol,
+                expiration_gte=(today + timedelta(days=filters.dte_min)
+                                ).isoformat(),
+                expiration_lte=(today + timedelta(days=filters.dte_max)
+                                ).isoformat(),
+            )
+            oi_map: dict[str, tuple[int, str | None]] = {}
+            for contract in contracts:
+                occ = str(contract.get("symbol") or "")
+                if not occ:
+                    continue
+                raw_oi = contract.get("open_interest")
+                oi_map[occ] = (
+                    int(raw_oi) if raw_oi is not None else 0,
+                    contract.get("open_interest_date"),
+                )
+        except Exception as exc:  # noqa: BLE001 - degrade, never zero the chain
+            self._oi_cache[symbol] = (now, None)
+            try:
+                await self.market.db.log_event(
+                    "WARN", "chain", "CHAIN_OI_UNAVAILABLE",
+                    f"{symbol}: contracts endpoint failed; OI gate stands "
+                    f"down this fetch: {exc}"[:220])
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+
+        self._oi_cache[symbol] = (now, oi_map)
+        return oi_map
+
     async def fetch(self, symbol: str, underlying_price: float,
                     filters: ChainFilters,
                     now: datetime | None = None) -> ChainResult:
@@ -145,6 +208,7 @@ class ChainService:
                              fetched_at=now)
 
         raw = await self._raw_chain(symbol, filters, now)
+        oi_map = await self._open_interest_map(symbol, filters, now)
         result.contracts_seen = len(raw)
         today = to_et(now).date()
 
@@ -165,7 +229,7 @@ class ChainService:
 
             leg = await self._build_leg(
                 occ, symbol, expiry, opt_type, strike, snap,
-                underlying_price, filters, now, result)
+                underlying_price, filters, now, result, oi_map)
             if leg is None:
                 continue
 
@@ -180,7 +244,9 @@ class ChainService:
     async def _build_leg(self, occ: str, underlying: str, expiry: date,
                          opt_type: str, strike: float, snap: dict[str, Any],
                          underlying_price: float, filters: ChainFilters,
-                         now: datetime, result: ChainResult) -> OptionLeg | None:
+                         now: datetime, result: ChainResult,
+                         oi_map: dict[str, tuple[int, str | None]]
+                         | None = None) -> OptionLeg | None:
         quote = snap.get("latestQuote") or {}
         greeks = snap.get("greeks") or {}
         trade = snap.get("latestTrade") or {}
@@ -208,11 +274,19 @@ class ChainService:
             result.rejections.append((occ, "OPT_SPREAD_TOO_WIDE", f"{sp:.3f}"))
             return None
 
+        # OI source of truth: snapshot fields when present (they are not,
+        # on the Indicative feed — measured live 2026-09-02), else the
+        # contracts-endpoint map. Only when the map itself is unavailable
+        # does the gate stand down (degradation, logged once per fetch).
         oi = snap.get("openInterest") or snap.get("open_interest")
-        if filters.min_open_interest > 0:
-            # A missing OI is not evidence of liquidity. When the tier
-            # demands a floor, absence fails it — the previous check let
-            # a contract with no OI field through every tier.
+        oi_date = snap.get("openInterestDate") or snap.get("open_interest_date")
+        if oi is None and oi_map is not None:
+            entry = oi_map.get(occ)
+            if entry is not None:
+                oi, oi_date = entry
+        if filters.min_open_interest > 0 and oi_map is not None:
+            # A missing OI with the authoritative source available is not
+            # evidence of liquidity — it usually means a brand-new listing.
             if oi is None:
                 result.rejections.append((occ, "OPT_OI_MISSING", "absent"))
                 return None
@@ -246,7 +320,6 @@ class ChainService:
             adjusted_mid = delta_adjust(raw_mid, float(delta or 0.0), move)
             result.any_stale_adjusted = True
 
-        oi_date = snap.get("openInterestDate") or snap.get("open_interest_date")
         try:
             return OptionLeg(
                 symbol=occ, underlying=underlying, expiration=expiry,

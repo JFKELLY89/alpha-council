@@ -459,8 +459,13 @@ class PositionMonitor:
             except Exception:  # noqa: BLE001 - fall back to entry quotes
                 pass
 
+        # The REAL decision id, not a synthetic "{id}_x": orders.decision_id
+        # is a foreign key into decisions, and the suffix made every close
+        # order's audit row fail it (caught live 2026-09-02 on the first
+        # journaled lifecycle). orders.intent='CLOSE' already tells the two
+        # sides apart, and client order ids are random-suffixed per call.
         outcome = await self.orders.execute_with_walk(
-            position.structure, f"{position.decision_id}_x", position.qty,
+            position.structure, position.decision_id, position.qty,
             max_allowed_debit=position.structure.natural_debit, closing=True,
             close_adjusted_mid=close_mid,
             close_conservative=close_conservative)

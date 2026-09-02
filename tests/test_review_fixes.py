@@ -325,3 +325,72 @@ async def test_restore_selects_risk_approved_structure(db):
     position = monitor.tracked[0]
     assert position.structure.structure_id == "st_selected"
     assert position.track is CandidateTrack.EVENT
+
+
+# ======================================================================
+# 8. Open interest comes from the contracts endpoint (found live 09-02:
+#    the Indicative snapshots carry NO OI field at all)
+# ======================================================================
+
+def _chain_service():
+    from alpha_council.options_engine.chain import ChainService
+
+    return ChainService(api=None, market=None)
+
+
+def _snap(now):
+    return {
+        "latestQuote": {"bp": 5.00, "ap": 5.10,
+                        "t": now.isoformat().replace("+00:00", "Z")},
+        "greeks": {"delta": 0.55},
+        "dailyBar": {"v": 500},
+    }
+
+
+@pytest.mark.asyncio
+async def test_oi_enriched_from_contracts_map():
+    from alpha_council.options_engine.chain import ChainFilters, ChainResult
+
+    service = _chain_service()
+    result = ChainResult(symbol="SPY", underlying_price=760.0,
+                         fetched_at=NOW)
+    occ = "SPY260918C00760000"
+    leg = await service._build_leg(
+        occ, "SPY", EXP, "CALL", 760.0, _snap(NOW), 760.0,
+        ChainFilters(min_open_interest=250), NOW, result,
+        oi_map={occ: (5000, "2026-09-01")})
+    assert leg is not None
+    assert leg.open_interest == 5000
+    assert str(leg.open_interest_date) == "2026-09-01"
+
+
+@pytest.mark.asyncio
+async def test_missing_from_oi_map_rejects():
+    from alpha_council.options_engine.chain import ChainFilters, ChainResult
+
+    service = _chain_service()
+    result = ChainResult(symbol="SPY", underlying_price=760.0,
+                         fetched_at=NOW)
+    leg = await service._build_leg(
+        "SPY260918C00760000", "SPY", EXP, "CALL", 760.0, _snap(NOW), 760.0,
+        ChainFilters(min_open_interest=250), NOW, result,
+        oi_map={"OTHER": (5000, None)})
+    assert leg is None
+    assert any(g == "OPT_OI_MISSING" for _, g, _ in result.rejections)
+
+
+@pytest.mark.asyncio
+async def test_oi_gate_stands_down_when_source_unavailable():
+    """A contracts-endpoint outage degrades the gate, never the chain:
+    without this, an OI-source failure rejects every contract and the
+    desk goes dark (exactly what happened live before the fix)."""
+    from alpha_council.options_engine.chain import ChainFilters, ChainResult
+
+    service = _chain_service()
+    result = ChainResult(symbol="SPY", underlying_price=760.0,
+                         fetched_at=NOW)
+    leg = await service._build_leg(
+        "SPY260918C00760000", "SPY", EXP, "CALL", 760.0, _snap(NOW), 760.0,
+        ChainFilters(min_open_interest=250), NOW, result, oi_map=None)
+    assert leg is not None
+    assert leg.open_interest is None
