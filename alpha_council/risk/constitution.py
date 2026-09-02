@@ -276,23 +276,31 @@ class RiskConstitution:
                     message=f"inside the blackout window for {window.name}",
                     observed_value=window.name))
 
-        floor = float(tier_cfg.get("pm_confidence_floor", 0.60))
-        if request.pm_confidence < floor:
-            v.append(RiskViolation(
-                rule_id="RISK_PM_CONFIDENCE", severity=Severity.BLOCK,
-                message=f"PM confidence {request.pm_confidence:.2f} below "
-                        f"the tier floor {floor:.2f}",
-                observed_value=request.pm_confidence, allowed_value=floor))
+        # PM-confidence and opportunity-score floors are QUALITY opinions
+        # about alpha attractiveness. A CALIBRATION lifecycle test (§1.5)
+        # has no PM and no score by construction — it exists to exercise
+        # execution, journaling, and calibration — so the quality floors
+        # do not apply to it. Every hard gate above and below (paper lock,
+        # drawdowns, blackout, cutoff, VETO, structure, DTE, sizing caps,
+        # liquidity floor) still binds identically.
+        if not request.is_calibration_trade:
+            floor = float(tier_cfg.get("pm_confidence_floor", 0.60))
+            if request.pm_confidence < floor:
+                v.append(RiskViolation(
+                    rule_id="RISK_PM_CONFIDENCE", severity=Severity.BLOCK,
+                    message=f"PM confidence {request.pm_confidence:.2f} below "
+                            f"the tier floor {floor:.2f}",
+                    observed_value=request.pm_confidence, allowed_value=floor))
 
-        score_floor = float(tier_cfg.get("final_score_floor", 68.0))
-        if request.final_opportunity_score < score_floor:
-            v.append(RiskViolation(
-                rule_id="RISK_SCORE_FLOOR", severity=Severity.BLOCK,
-                message=f"opportunity score "
-                        f"{request.final_opportunity_score:.1f} below the "
-                        f"tier floor {score_floor:.1f}",
-                observed_value=round(request.final_opportunity_score, 1),
-                allowed_value=score_floor))
+            score_floor = float(tier_cfg.get("final_score_floor", 68.0))
+            if request.final_opportunity_score < score_floor:
+                v.append(RiskViolation(
+                    rule_id="RISK_SCORE_FLOOR", severity=Severity.BLOCK,
+                    message=f"opportunity score "
+                            f"{request.final_opportunity_score:.1f} below the "
+                            f"tier floor {score_floor:.1f}",
+                    observed_value=round(request.final_opportunity_score, 1),
+                    allowed_value=score_floor))
 
     def _check_structure(self, s: OptionStructure, tier_cfg: dict[str, Any],
                          v: list[RiskViolation]) -> None:

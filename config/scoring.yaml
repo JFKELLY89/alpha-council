@@ -31,7 +31,11 @@ discovery:
   options_prescreen_top_n: 20
   final_candidate_top_n: 5
   dynamic_ttl_minutes: 90
-  news_lookback_hours: 8
+  # R3 (2026-09-01): raised 8 -> 18 so the 09:40 open scan can see the
+  # 16:00-01:40 overnight tape it was blind to. Freshness decay already
+  # discounts old stories in scoring and item dedup makes re-seen news
+  # idempotent, so the only cost is a slightly larger first fetch.
+  news_lookback_hours: 18
 
   enable_most_active: true
   enable_movers: true
@@ -339,8 +343,13 @@ models:
   portfolio_manager:   {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
   structure_selection: {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 3000}
   pm_revision:         {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 7000}
-  red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 8000}
-  scenario_generator:  {provider: openai,    model: gpt-5.6-luna,    reasoning: medium, evidence_cap_tokens: 3500}
+  # R4 (2026-09-01): §14.3's surplus-spend instruction, gated on Day-1
+  # measured spend - $0.52 of $100 used, so the gate has passed. Red Team
+  # evidence cap 8k -> 12k (the spec's first-priority upgrade) and the
+  # scenario generator restored to Sol (v2.5 §16's original assignment,
+  # which had been downgraded for a cost concern that never materialized).
+  red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 12000}
+  scenario_generator:  {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 3500}
   lessons:             {provider: openai,    model: gpt-5.6-sol,     reasoning: high,   evidence_cap_tokens: 12000}
   briefing:            {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
   alpha_evolution:     {provider: openai,    model: gpt-5.6-sol,     reasoning: high,   evidence_cap_tokens: 10000}

@@ -323,6 +323,54 @@ def test_resize_oversized_trade():
     assert ev.approved_qty >= 1
 
 
+def test_calibration_trade_waives_quality_floors_only():
+    """§1.5 lifecycle tests have no PM and no score by construction, so
+    the PM-confidence and opportunity-score QUALITY floors do not apply.
+    Nothing else is waived."""
+    ev = _rc().evaluate(_request(pm_confidence=0.0,
+                                 final_opportunity_score=0.0,
+                                 is_calibration_trade=True),
+                        _portfolio(), now=NOW)
+    assert ev.decision is RiskDecision.APPROVE
+
+    # The identical request WITHOUT the flag dies on both floors.
+    ev = _rc().evaluate(_request(pm_confidence=0.0,
+                                 final_opportunity_score=0.0),
+                        _portfolio(), now=NOW)
+    assert ev.decision is RiskDecision.REJECT
+    rule_ids = {v.rule_id for v in ev.violations}
+    assert {"RISK_PM_CONFIDENCE", "RISK_SCORE_FLOOR"} <= rule_ids
+
+
+def test_calibration_trade_hard_gates_still_bind():
+    """The waiver covers quality opinions, never safety: a VETO, the
+    cutoff, and the drawdown halt all reject a calibration trade too."""
+    veto = _rc().evaluate(_request(is_calibration_trade=True,
+                                   pm_confidence=0.0,
+                                   final_opportunity_score=0.0,
+                                   red_team_verdict=Verdict.VETO,
+                                   red_team_max_risk_pct=0.0),
+                          _portfolio(), now=NOW)
+    assert veto.decision is RiskDecision.REJECT
+    assert any(v.rule_id == "RISK_RED_TEAM_VETO" for v in veto.violations)
+
+    late = NOW.replace(hour=15, minute=30)
+    after_cutoff = _rc().evaluate(_request(is_calibration_trade=True,
+                                           pm_confidence=0.0,
+                                           final_opportunity_score=0.0),
+                                  _portfolio(), now=late)
+    assert after_cutoff.decision is RiskDecision.REJECT
+    assert any(v.rule_id == "RISK_AFTER_CUTOFF"
+               for v in after_cutoff.violations)
+
+    drawn_down = _portfolio(equity=94_000.0)
+    halted = _rc().evaluate(_request(is_calibration_trade=True,
+                                     pm_confidence=0.0,
+                                     final_opportunity_score=0.0),
+                            drawn_down, now=NOW)
+    assert halted.decision is RiskDecision.HALT
+
+
 def test_pass_verdict_cap_is_ignored():
     """On PASS the recommendation is context, not a constraint: no shadow
     variant exists for it, so honouring it would produce a size change the

@@ -2,7 +2,7 @@
 
 **Written:** 2026-09-01, ~23:15 ET (after the feature-completion push, before the Sep 2 session)
 **Review:** Sep 2 after the 16:15 post-close cycle, together with the day's data
-**Rule in force:** *No changes have been made on the basis of this document.* Every recommendation below is deferred to the Sep 2 evening review, consistent with the spec's own discipline (§20.3: at most one quality-gate change per day, hard gates never; §22 Phase E: no refactors on the last trading day).
+**Status:** R1–R5 were **accepted by the operator and implemented the same night** (see Part 3 for what shipped). **R6–R8 remain untouched**, deferred to the Sep 2 evening review per the spec's discipline (§20.3: at most one quality-gate change per day, hard gates never; §22 Phase E: no refactors on the last trading day). No quality gate has moved: R1/R2 are operational tooling, R3/R4 are spec-sanctioned config, R5 is wording.
 
 **Clock:** trading sessions remain Sep 2 and Sep 3 (flatten 15:45 ET Sep 3). Submission closes **Sep 4, 11:00 ET** — the morning after the last session, so anything not finished by Sep 3 evening is being finished under deadline pressure.
 
@@ -70,34 +70,28 @@ The automatic flatten depends on one process being alive at 15:45. The missing `
 
 ---
 
-## Part 3 — Recommended modifications (deferred; decide at the Sep 2 review)
+## Part 3 — Recommended modifications
 
-Ranked by (demo value × safety). **Effort** is wall-clock including tests. None touch hard gates.
+**Status update (2026-09-01, late evening): R1–R5 were accepted and implemented the same night** (operator decision). R6–R8 remain deferred to the Sep 2 post-close review as originally planned.
 
-### R1 — `scripts/close_all.py` (spec §18.2 requires it; it does not exist)
-*Change:* a standalone script that reads open positions from the broker, cross-references trade_journal, closes every option position via the (new) credit-side walk, journals the closes, and prints a reconciliation. Runnable independently of the scheduler process.
-*Why:* the only manual flatten path today is the Alpaca web UI, leg by leg. On Sep 3 at 15:40 with a wedged scheduler, this script is the difference between "realized P&L in the submission" and improvisation.
-*Effort:* ~1.5h. *Risk:* low (reuses `PositionMonitor.close`/`flatten_all` machinery). **Recommend: accept, build Sep 2 evening, test with the day's calibration position.**
+### R1 — `scripts/close_all.py` — ✅ IMPLEMENTED
+Standalone flatten runnable with no scheduler: cancels working orders, closes every journaled position through the full path (credit walk, close-side calibration, journal close, shadow freeze + attribution), names **broker-only orphans loudly** and closes them leg-by-leg with marketable limits (the Aug 31 lesson encoded), then re-verifies both books and exits non-zero if anything remains open. Dry-run by default; `--execute` to act; `--competition` journals closes as COMPETITION_FLATTEN.
 
-### R2 — Journaled calibration lifecycle (verify/extend `vertical_slice.py`)
-*Change:* make the supervised calibration path write what the orchestrator path writes: `journal.open_trade` → EXECUTED shadow variant → close via `monitor.close` (which now records close-side calibration and freezes shadow variants). Possibly a thin `scripts/calibration_trade.py` wrapping the existing pieces.
-*Why:* Aug 31 proved the current script fills at the broker but leaves the books empty — exactly the gap that leaves the differentiator demo dataless (§0 above).
-*Effort:* ~1–2h. *Risk:* low; it composes existing, tested components. **Recommend: accept, build Sep 2 morning pre-open (it gates item 2.1).**
+### R2 — Journaled calibration lifecycle — ✅ IMPLEMENTED as `scripts/calibration_trade.py`
+A purpose-built script rather than surgery on `vertical_slice.py` (which stays as the smoke-test probe): builds a real spread on a configured calibration symbol, runs the **Risk Constitution with every hard gate binding** (a new `is_calibration_trade` waiver covers only the PM-confidence and opportunity-score *quality* floors, which have no meaning for a PM-less lifecycle test — pinned by tests), does the §17.4 pre-submit refresh, walks the open, journals everything (decision states, trade_journal, EXECUTED shadow, both-side execution calibrations), holds, and closes through `monitor.close`. Ends with a row-by-row reconciliation printout. Dry-run by default; `--execute` for the real lifecycle; `--skip-close` leaves the position journaled and monitor-restorable. **Sep 2 mid-morning: run it once supervised (§2.1).**
 
-### R3 — Session-open news lookback 18h (config only)
-*Evidence:* `news_lookback_hours: 8` means the 09:40 scan sees only 01:40–09:40 — every evening-and-overnight story from 16:00–01:40 is invisible to the scorer at the open (the pre-market brief sees 18h, but the brief is context-only by design). The EVENT track starves at exactly the scan where overnight catalysts matter most.
-*Change:* first scan of the day uses ~18h lookback, later scans keep 8h (one conditional in `_gather_intelligence`, or simply raise the config value to 18 — dedup makes re-seen items idempotent; freshness decay already discounts old stories in scoring).
-*Effort:* ~20min. *Risk:* very low (scoring already handles staleness; the simple config bump is the safest form). **Recommend: accept the config bump.**
+### R3 — Session-open news lookback — ✅ IMPLEMENTED (config bump, 8h → 18h)
+The 09:40 scan can now see the 16:00–01:40 overnight tape. Dedup keeps re-seen items idempotent; freshness decay already discounts old stories in scoring.
 
-### R4 — Spend the surplus on quality (spec §14.3's own instruction, gated on "after Day 1 measured spend" — that gate has passed)
-*Evidence:* $0.52 + $0.00 spent of $100. The spec explicitly orders the surplus spend: Red Team evidence cap first.
-*Change (config only):* `red_team.evidence_cap_tokens: 8000 → 12000`; `scenario_generator.model: gpt-5.6-luna → gpt-5.6-sol` (v2.5 §16's original assignment, downgraded for cost that never materialized).
-*Effort:* ~5min. *Risk:* negligible (worst case ≈ +$0.05/council; ceilings unchanged). **Recommend: accept both.**
+### R4 — Spend the surplus — ✅ IMPLEMENTED (config)
+`red_team.evidence_cap_tokens: 8000 → 12000` (the spec's first-priority §14.3 upgrade) and `scenario_generator` restored to **Sol** (v2.5 §16's original assignment). Worst case ≈ +$0.05/council against $99.48 of unused budget.
 
-### R5 — The MCP execution claim (language fix vs. code change)
-*Evidence:* §27.8's demo line says "Alpaca MCP submits the multi-leg order," but submission is REST (`OrderManager._post`); MCP serves the control plane (measured share reported honestly). The MCP inventory resolved `place_option_order` at startup, so routing is *possible*.
-*Options:* (a) reword the demo/write-up — "MCP is the control plane (account, clock, positions — measured X% of control calls); execution uses REST for idempotent retry-safety" — zero risk, honest, defensible; (b) route order submission through MCP-with-REST-fallback — touches the most safety-critical code path in the system, two days before submission.
-*Recommend:* **(a)**. Only consider (b) if Sep 2 produces multiple clean fills AND there is appetite on Sep 2 evening; never on Sep 3.
+### R5 — The MCP execution claim — ✅ DECIDED: language fix (option a)
+Swept the repo: no code, docstring, dashboard, or runbook text claims MCP submits orders — only the spec's own demo narrative does, and specs are inputs, not claims we publish. **Canonical wording for the README, write-up, and video narration:**
+
+> *Alpaca's MCP server is Alpha Council's control plane: account state, the market clock, and positions are served over MCP, with the measured MCP share of control-plane calls reported in the Audit tab. Order execution deliberately uses Alpaca's REST API directly, because the idempotent submit-verify-recover semantics around each `client_order_id` are load-bearing safety behavior we were not willing to route through a second transport during competition week.*
+
+Option (b) — routing submission through MCP-with-REST-fallback — remains available for a **Sep 2 evening** decision only if the day produces multiple clean fills; never on Sep 3.
 
 ### R6 — Tier-1 final floor 62 → 60 (conditional; the one §20.3(a) quality-gate move available tomorrow)
 *Evidence:* EVENT/BEARISH averages 61.9 — the strongest track sits *on* the floor; 82 candidates in the 55–62 band. But 26 already clear 62, so tomorrow may not need this.
@@ -131,7 +125,7 @@ For the record, so the review doesn't relitigate them:
 2. **Red Team first-run check:** `red_team_reviews` count, verdict mix, Anthropic spend. If still zero → the demo's governance layer needs Sep 3's sessions; prioritize anything that gets a council past the PM.
 3. **Near-miss histogram for R6:** `SELECT COUNT(*) FROM gate_rejections WHERE gate_id='FINAL_SCORE_FLOOR' AND occurred_at >= <today>` plus the day's max final scores → accept/reject the 62→60 move (one gate, or none).
 4. **New-feature watch list results** (2.2): premarket / SEC / injection / presubmit / evolution — anything degraded gets a targeted look, not a rewrite.
-5. **Accept/reject R1–R5** (R1, R2, R3, R4 pre-recommended as accept; R5 = language).
+5. **R1–R5 are done** — instead: confirm R2's lifecycle actually ran during the day (§2.1), confirm R3/R4 behaved (bigger open-scan intel set; Red Team/scenario spend visible), and take the R5(b) go/no-go if the day produced multiple clean fills. Then **accept/reject R6** (floor 62→60) on the near-miss histogram, and triage R7–R8.
 6. **Snapshot the DB**, draft the README from the review doc, screenshot whatever now has data.
 7. **Set the Sep 3 plan:** start before 08:45, calibration lifecycle(s) if tracked count < 4, no code changes after market open, flatten verified 15:45, assets in the evening, submit Sep 4 by 10:00 ET with an hour of slack.
 
