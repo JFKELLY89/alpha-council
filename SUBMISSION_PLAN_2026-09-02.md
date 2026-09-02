@@ -131,4 +131,18 @@ For the record, so the review doesn't relitigate them:
 
 ---
 
+## Part 6 — Sep 2 evening: results against this plan
+
+Recorded ~18:00 ET Sep 2, after the 16:15 post-close cycle. Agenda numbering follows Part 5.
+
+1. **Did anything trade?** One CALIBRATION lifecycle through the full journaled path (SPY 759/772: open walked 3 rungs to 5.33 in 86s, close filled first credit rung 5.24 in 0.2s, realized **−$9.00**; both-side calibrations recorded: open bias +$0.13, close +$0.005). Zero alpha trades — every abstain/rejection was reasoned, none were system failures. §2.1's tracked-count target now stands at 1 of ≥3; **Sep 3 morning should run 1–2 more calibration lifecycles.**
+2. **Red Team first-run:** 3 MODIFY verdicts (HL, EOSE, IREN) with substantive critiques; 6 Anthropic runs, $0.34 spend. Two early calls died at the 4096 default `max_tokens` (fixed to 16384 same day); every later call clean. The governance layer has live history for the demo.
+3. **R6 near-miss histogram:** 26 `FINAL_SCORE_FLOOR` rejections on the day, but only **2 genuine near-misses** (61.1, 61.0 — both EVENT vs the 62 floor) and 4 candidates total in the 58–62 band, against 56 clearing 62. Councils were never under-quota because of the floor (the day-cap was the binding constraint until fixed). **R6's acceptance condition was not met**; the operator instead shipped a narrower, better-targeted change the same evening: EVENT candidates get their own per-tier `final_score_floor_event` (2 below momentum's bar) — commit `1881a41` — plus `RISK_PM_CONFIDENCE` now tests rev-0 conviction (commit `4615ff4`), addressing the IREN 0.51-vs-0.52 death directly. The Tier-1 62 floor itself did not move.
+4. **New-feature watch list:** premarket brief ✅ (1 row, 08:45), SEC collector ✅ (11–22 filings/scan; recalibrated bands held after the 424B purge), news injection ✅ (17–54 symbols/scan), presubmit refresh ✅ (exercised by the calibration open), evolution post-close ✅ (3 lessons, explicit NO_CHANGE on one-calibration-trade evidence — the epistemically correct call and a demo asset). Shadow marks on an open alpha position remain unproven (none opened).
+5. **R5(b)** (MCP-with-fallback execution): **no-go** — the day produced one clean fill pair, not "multiple"; language stands as written. **R7** (attribution reconciliation): 6 decision_attribution rows exist; totals are all zero as expected — a calibration trade has no GPT/Claude variants, so layer effects are structurally 0 while journal P&L is −$9.00; no discrepancy. Real reconciliation waits for the first alpha close. **R8**: untouched, still optional.
+6. **Assets:** README written and pushed (`40cdeb6`), SUBMISSION_WRITEUP.md written and pushed, VIDEO_SCRIPT.md drafted local-only (gitignored per operator instruction), DB snapshot taken to `..\alpha-council-snapshots\alpha_council_2026-09-02.db`. Screenshots deferred to Sep 3 final data.
+7. **Sep 3 plan stands** as written, with one addition: verify the five 09-02 evening live-patches (seat allocation, output_config effort, EVENT floor, rev-0 conviction floor, volume-gate stand-down) behave on the 09:40 scan before leaving the desk unattended.
+
+---
+
 *Companion documents: `CODE_REVIEW_2026-09-01.md` (issue register and feature build record, incl. the Part 8 session-morning checklist), `MONDAY_RUNBOOK_v3.md` (operational commands).*
