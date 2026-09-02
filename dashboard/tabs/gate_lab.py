@@ -8,7 +8,7 @@ from pathlib import Path
 import plotly.express as px
 import streamlit as st
 
-from dashboard import queries
+from dashboard import queries, theme
 from dashboard.formatting import empty_message, format_currency, format_et
 
 
@@ -32,7 +32,7 @@ def render(database_path: str | Path) -> None:
             labels={"gate_id": "Gate", "rejections": "Rejections"},
         )
         figure.update_layout(margin=dict(l=10, r=10, t=25, b=10))
-        st.plotly_chart(figure, use_container_width=True)
+        theme.plot(figure)
 
     st.markdown("#### GateValue")
     st.caption("GateValue = −1 × mean hypothetical P&L per spread of blocked trades. Positive means the gate earned its place.")
@@ -41,8 +41,9 @@ def render(database_path: str | Path) -> None:
         st.info(empty_message("gate_value"))
     else:
         rows = []
+        muted = theme.active_palette().muted
         for row in gate_value.itertuples():
-            row_style = "color:#888;opacity:.65" if row.low_sample else ""
+            row_style = f"color:{muted};opacity:.65" if row.low_sample else ""
             rows.append(
                 "<tr style='{}'><td>{}</td><td>{}</td><td>{}</td>"
                 "<td>{}</td><td>n = {}</td></tr>".format(
@@ -70,7 +71,7 @@ def render(database_path: str | Path) -> None:
         timeline = tiers[["config_version", "tier", "activated_at", "deactivated_at", "note"]].copy()
         timeline["activated_at"] = timeline["activated_at"].map(format_et)
         timeline["deactivated_at"] = timeline["deactivated_at"].map(format_et)
-        st.dataframe(timeline, use_container_width=True, hide_index=True)
+        st.dataframe(timeline, width="stretch", hide_index=True)
 
     st.markdown("#### Profitable trades that gates blocked")
     blocked = queries.get_profitable_blocked_trades(database_path)
@@ -82,7 +83,7 @@ def render(database_path: str | Path) -> None:
             display[column] = display[column].map(format_et)
         st.dataframe(
             display,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "final_pnl_per_spread": st.column_config.NumberColumn(format="$%.0f")

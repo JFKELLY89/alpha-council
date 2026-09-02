@@ -40,7 +40,7 @@ def render(database_path: str | Path) -> None:
         else:
             display = timeline.drop(columns=["details_json"], errors="ignore").copy()
             display["occurred_at"] = display["occurred_at"].map(format_et)
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.dataframe(display, width="stretch", hide_index=True)
             with st.expander("Timeline details"):
                 for _, event in timeline.iterrows():
                     st.markdown(
@@ -77,7 +77,7 @@ def render(database_path: str | Path) -> None:
             display["occurred_at"] = display["occurred_at"].map(format_et)
             st.dataframe(
                 display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={"cost_usd": st.column_config.NumberColumn(format="$%.4f")},
             )
@@ -102,7 +102,7 @@ def render(database_path: str | Path) -> None:
     else:
         display = events.drop(columns=["context_json"], errors="ignore").copy()
         display["occurred_at"] = display["occurred_at"].map(format_et)
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.dataframe(display, width="stretch", hide_index=True)
         with st.expander("Raw event context"):
             for _, event in events.iterrows():
                 st.markdown(

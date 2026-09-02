@@ -121,7 +121,7 @@ def _render_proposal(row: pd.Series, label: str) -> None:
     invalidations = parse_json(row["invalidation_json"], fallback=[])
     if invalidations:
         st.markdown("**Invalidation rules**")
-        st.dataframe(pd.DataFrame(invalidations), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(invalidations), width="stretch", hide_index=True)
 
 
 def render(database_path: str | Path) -> None:
@@ -164,14 +164,14 @@ def render(database_path: str | Path) -> None:
             "key_metrics_json",
         ]
         st.dataframe(
-            candidate[feature_columns], use_container_width=True, hide_index=True
+            candidate[feature_columns], width="stretch", hide_index=True
         )
     if discoveries.empty:
         st.caption("No discovery row is linked to this decision.")
     else:
         reasons = discoveries[["source", "discovery_reason", "discovered_at"]].copy()
         reasons["discovered_at"] = reasons["discovered_at"].map(format_et)
-        st.dataframe(reasons, use_container_width=True, hide_index=True)
+        st.dataframe(reasons, width="stretch", hide_index=True)
         st.caption("Discovery reasons are shown verbatim.")
 
     intel = queries.get_decision_intelligence(database_path, decision_id)
@@ -182,7 +182,7 @@ def render(database_path: str | Path) -> None:
                          "freshness_score", "created_at"]].copy()
         display["created_at"] = display["created_at"].map(format_et)
         st.dataframe(
-            display, use_container_width=True, hide_index=True,
+            display, width="stretch", hide_index=True,
             column_config={
                 "catalyst_score": st.column_config.NumberColumn(
                     "Catalyst", format="%.1f"),
@@ -252,7 +252,7 @@ def render(database_path: str | Path) -> None:
         ]
         st.dataframe(
             display,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "adjusted_mid_debit": st.column_config.NumberColumn(format="$%.2f"),
@@ -279,7 +279,7 @@ def render(database_path: str | Path) -> None:
         st.markdown(f"**Strongest counterargument:** {review['strongest_counterargument']}")
         problems = parse_json(review["problems_json"], fallback=[])
         if problems:
-            st.dataframe(pd.DataFrame(problems), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(problems), width="stretch", hide_index=True)
         _write_list(
             "Information that would reverse the verdict",
             _string_list(review["information_to_reverse_json"]),
@@ -309,7 +309,7 @@ def render(database_path: str | Path) -> None:
             )
             comparison = comparison[comparison["initial"].astype(str) != comparison["revised"].astype(str)]
             if not comparison.empty:
-                st.dataframe(comparison, use_container_width=True, hide_index=True)
+                st.dataframe(comparison, width="stretch", hide_index=True)
 
     st.markdown("### 7. Risk Constitution")
     if risks.empty:
@@ -323,7 +323,7 @@ def render(database_path: str | Path) -> None:
         summary[3].metric("Approved max loss", format_currency(risk["approved_max_loss"]))
         violations = parse_json(risk["violations_json"], fallback=[])
         if violations:
-            st.dataframe(pd.DataFrame(violations), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(violations), width="stretch", hide_index=True)
         else:
             st.caption("No Risk Constitution violations were recorded.")
 
@@ -337,16 +337,16 @@ def render(database_path: str | Path) -> None:
         order_display = orders.drop(columns=["raw_json"], errors="ignore").copy()
         for column in ["submitted_at", "updated_at"]:
             order_display[column] = order_display[column].map(format_et)
-        st.dataframe(order_display, use_container_width=True, hide_index=True)
+        st.dataframe(order_display, width="stretch", hide_index=True)
     if not fills.empty:
         fill_display = fills.drop(columns=["raw_json"], errors="ignore").copy()
         fill_display["filled_at"] = fill_display["filled_at"].map(format_et)
-        st.dataframe(fill_display, use_container_width=True, hide_index=True)
+        st.dataframe(fill_display, width="stretch", hide_index=True)
     if not outcome.empty:
         outcome_display = outcome.copy()
         for column in ["opened_at", "closed_at"]:
             outcome_display[column] = outcome_display[column].map(format_et)
-        st.dataframe(outcome_display, use_container_width=True, hide_index=True)
+        st.dataframe(outcome_display, width="stretch", hide_index=True)
 
     with st.expander("Exact agent prompts and raw outputs"):
         if runs.empty:

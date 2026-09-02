@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from alpha_council.settings import get_settings
+from dashboard import theme
 from dashboard.tabs import (
     audit,
     command_center,
@@ -30,23 +31,9 @@ from dashboard.tabs import (
 
 st.set_page_config(
     page_title="Alpha Council",
-    page_icon="⚖️",
+    page_icon=str(theme.EMBLEM) if theme.EMBLEM.exists() else "⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-    .block-container {padding-top: 1.4rem; padding-bottom: 3rem;}
-    [data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.22); border-radius: .6rem; padding: .75rem;}
-    .ac-kicker {letter-spacing: .12em; text-transform: uppercase; opacity: .65; font-size: .72rem;}
-    .ac-effect {border: 1px solid rgba(128,128,128,.22); border-radius: .6rem; padding: .8rem 1rem; min-height: 7rem;}
-    .ac-effect .value {font-size: 1.55rem; font-weight: 650; margin: .2rem 0;}
-    .ac-muted {opacity: .62;}
-    </style>
-    """,
-    unsafe_allow_html=True,
 )
 
 
@@ -55,18 +42,25 @@ def main() -> None:
     database_path = Path(settings.database_path)
 
     with st.sidebar:
+        if theme.EMBLEM.exists():
+            st.image(str(theme.EMBLEM), width=170)
         st.markdown("### Alpha Council")
         st.caption("Read-only presentation layer")
+
+        # The toggle is the first stateful thing on the page: everything
+        # downstream reads the palette it selects. Dark is the brand.
+        palette = theme.theme_toggle()
+
         st.code(str(database_path), language=None)
-        if st.button("Refresh database", use_container_width=True):
+        if st.button("Refresh database", width="stretch"):
             st.cache_data.clear()
             st.rerun()
         st.divider()
         st.caption("SQLite mode=ro · 30-second query cache · no API or LLM calls")
 
-    st.markdown('<div class="ac-kicker">Autonomous options desk</div>', unsafe_allow_html=True)
-    st.title("Alpha Council")
-    st.caption("Why the system noticed it, why it acted, and whether governance added or destroyed value.")
+    theme.apply_streamlit_theme(palette)
+    theme.inject_css(palette)
+    theme.brand_header()
 
     if not database_path.exists():
         st.error(f"Database not found: {database_path}")

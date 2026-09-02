@@ -93,7 +93,7 @@ def render(database_path: str | Path) -> None:
             "strategy_id", "observations", "closed_trades", "total_pnl",
             "return_pct", "win_rate", "expectancy", "max_drawdown_pct",
             "event_pnl", "momentum_pnl"]].copy()
-        st.dataframe(display, use_container_width=True, hide_index=True,
+        st.dataframe(display, width="stretch", hide_index=True,
                      column_config={
                          "total_pnl": st.column_config.NumberColumn(
                              format="$%.2f"),
@@ -112,7 +112,7 @@ def render(database_path: str | Path) -> None:
                     "shadow). Stated, not smoothed over.")
     if not shadows.empty:
         st.markdown("#### Shadow decisions")
-        st.dataframe(shadows, use_container_width=True, hide_index=True)
+        st.dataframe(shadows, width="stretch", hide_index=True)
 
     # ---- promotion checklist ----------------------------------------
     recommendations = queries.get_promotion_recommendations(database_path)

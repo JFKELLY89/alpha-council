@@ -10,7 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboard import queries
+from dashboard import queries, theme
 from dashboard.formatting import empty_message, format_currency, format_et, parse_json
 
 
@@ -72,7 +72,7 @@ def render(database_path: str | Path) -> None:
                     },
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "selection": st.column_config.NumberColumn(format="$%.0f"),
@@ -116,7 +116,7 @@ def render(database_path: str | Path) -> None:
     )
     st.dataframe(
         variants,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "pnl_per_spread": st.column_config.NumberColumn(format="$%.0f"),
@@ -137,6 +137,7 @@ def render(database_path: str | Path) -> None:
         detail["risk_sizing_effect"],
         detail["executed_pnl"],
     ]
+    palette = theme.active_palette()
     waterfall = go.Figure(
         go.Waterfall(
             orientation="v",
@@ -147,16 +148,21 @@ def render(database_path: str | Path) -> None:
             y=steps,
             text=[format_currency(value) for value in steps],
             textposition="outside",
-            connector={"line": {"width": 1}},
+            connector={"line": {"width": 1, "color": palette.border}},
+            # Financial semantics stay conventional in both modes: a step
+            # that added money is green, one that cost money is red, and
+            # the anchoring totals wear the gold.
+            increasing={"marker": {"color": palette.gain}},
+            decreasing={"marker": {"color": palette.loss}},
+            totals={"marker": {"color": palette.gold}},
         )
     )
     waterfall.update_layout(
         margin=dict(l=10, r=10, t=25, b=10),
-        height=380,
         yaxis_title="P&L ($)",
         showlegend=False,
     )
-    st.plotly_chart(waterfall, use_container_width=True)
+    theme.plot(waterfall, height=380)
     st.caption(
         "Each step is one governance layer's measured effect. The bars walk "
         "from what the PM proposed to what was actually executed."
@@ -201,7 +207,7 @@ def render(database_path: str | Path) -> None:
     )
     st.dataframe(
         reconciliation,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             **{
@@ -233,7 +239,11 @@ def render(database_path: str | Path) -> None:
             y="unrealized_pnl",
             color="variant",
             markers=True,
+            # One identity per variant in every chart and both modes: the
+            # PM's original is council blue, the Red Team's is Evolution
+            # purple, and what actually executed wears the gold.
+            color_discrete_map=theme.variant_colors(theme.active_palette()),
             labels={"marked_at_et": "Marked at (ET)", "unrealized_pnl": "Unrealized P&L ($)"},
         )
         figure.update_layout(margin=dict(l=10, r=10, t=25, b=10))
-        st.plotly_chart(figure, use_container_width=True)
+        theme.plot(figure)

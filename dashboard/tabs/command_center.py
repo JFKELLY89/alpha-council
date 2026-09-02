@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from dashboard import queries
+from dashboard import queries, theme
 from alpha_council.utils.time import sessions_remaining, utc_now
 from dashboard.formatting import (
     current_et_day_start_utc,
@@ -26,6 +26,9 @@ def _value(row: pd.Series, key: str):
 
 
 def render(database_path: str | Path) -> None:
+    # The council chamber itself. Full artwork here and only here; every
+    # other tab keeps its vertical space for data.
+    theme.hero()
     st.subheader("Command Center")
     st.caption("Account, exposure, spend, and the current Risk Constitution state.")
 
@@ -115,7 +118,7 @@ def render(database_path: str | Path) -> None:
             )
             st.dataframe(
                 display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "market_value": st.column_config.NumberColumn(format="$%.0f"),
@@ -134,7 +137,7 @@ def render(database_path: str | Path) -> None:
             display = spend[["provider", "model", "requests", "cost_usd"]].copy()
             st.dataframe(
                 display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={"cost_usd": st.column_config.NumberColumn(format="$%.2f")},
             )

@@ -7,8 +7,13 @@ from pathlib import Path
 import plotly.express as px
 import streamlit as st
 
-from dashboard import queries
+from dashboard import queries, theme
 from dashboard.formatting import empty_message, format_et
+
+
+def _side_colors() -> dict[str, str]:
+    palette = theme.active_palette()
+    return {"OPEN": palette.gold, "CLOSE": palette.blue}
 
 
 def render(database_path: str | Path) -> None:
@@ -52,7 +57,7 @@ def render(database_path: str | Path) -> None:
             )
         st.dataframe(
             summary,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "mean_bias": st.column_config.NumberColumn(format="$%.2f"),
@@ -73,10 +78,11 @@ def render(database_path: str | Path) -> None:
                 x="fill_slippage_pct",
                 color="side",
                 barmode="overlay",
+                color_discrete_map=_side_colors(),
                 labels={"fill_slippage_pct": "Fill slippage (%)"},
             )
             figure.update_layout(margin=dict(l=10, r=10, t=20, b=10))
-            st.plotly_chart(figure, use_container_width=True)
+            theme.plot(figure)
         with chart_cols[1]:
             st.markdown("#### Seconds to fill")
             figure = px.histogram(
@@ -84,16 +90,17 @@ def render(database_path: str | Path) -> None:
                 x="seconds_to_fill",
                 color="side",
                 barmode="overlay",
+                color_discrete_map=_side_colors(),
                 labels={"seconds_to_fill": "Seconds"},
             )
             figure.update_layout(margin=dict(l=10, r=10, t=20, b=10))
-            st.plotly_chart(figure, use_container_width=True)
+            theme.plot(figure)
 
         table = calibrations.copy()
         for column in ["submitted_at", "filled_at"]:
             table[column] = table[column].map(format_et)
         with st.expander("Calibration rows"):
-            st.dataframe(table, use_container_width=True, hide_index=True)
+            st.dataframe(table, width="stretch", hide_index=True)
 
     st.markdown("#### Limit-walk attempts")
     if walks.empty:
@@ -105,7 +112,8 @@ def render(database_path: str | Path) -> None:
             y="fills",
             color="side",
             barmode="group",
+            color_discrete_map=_side_colors(),
             labels={"limit_walk_steps": "Limit-walk step", "fills": "Fills"},
         )
         figure.update_layout(margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(figure, use_container_width=True)
+        theme.plot(figure)

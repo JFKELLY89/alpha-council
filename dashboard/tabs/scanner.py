@@ -64,7 +64,7 @@ def render(database_path: str | Path) -> None:
 
     st.dataframe(
         display,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "fast_score": st.column_config.NumberColumn("FastScore", format="%.1f"),

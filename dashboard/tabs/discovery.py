@@ -8,7 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from dashboard import queries
+from dashboard import queries, theme
 from dashboard.formatting import empty_message, format_et, format_percent
 
 
@@ -30,11 +30,20 @@ def render(database_path: str | Path) -> None:
             latest["final_candidates"],
             latest["councils_started"],
         ]
+        palette = theme.active_palette()
         chart_col, track_col = st.columns([2, 1])
         with chart_col:
-            figure = go.Figure(go.Funnel(y=stages, x=values, textinfo="value+percent initial"))
-            figure.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=380)
-            st.plotly_chart(figure, use_container_width=True)
+            # Gold at the wide end fading toward the muted tone as the
+            # funnel narrows - the narrowing IS the brand story.
+            funnel_shades = [palette.gold, palette.gold_bright, palette.blue,
+                             palette.purple, palette.green, palette.muted]
+            figure = go.Figure(go.Funnel(
+                y=stages, x=values, textinfo="value+percent initial",
+                marker={"color": funnel_shades[: len(stages)]},
+                connector={"line": {"color": palette.border}},
+            ))
+            figure.update_layout(margin=dict(l=20, r=20, t=20, b=20))
+            theme.plot(figure, height=380)
             st.caption(
                 f"Latest scan: {latest['scan_id']} · {format_et(latest['as_of'])} · "
                 f"survival {format_percent(latest['survival_rate'], fraction=True)}"
@@ -44,9 +53,14 @@ def render(database_path: str | Path) -> None:
                 "Track": ["EVENT", "MOMENTUM"],
                 "Candidates": [latest["event_track_count"], latest["momentum_track_count"]],
             }
-            figure = px.pie(track, names="Track", values="Candidates", hole=0.58)
-            figure.update_layout(margin=dict(l=10, r=10, t=25, b=10), height=330)
-            st.plotly_chart(figure, use_container_width=True)
+            figure = px.pie(
+                track, names="Track", values="Candidates", hole=0.58,
+                color="Track",
+                color_discrete_map={"EVENT": palette.gold,
+                                    "MOMENTUM": palette.blue},
+            )
+            figure.update_layout(margin=dict(l=10, r=10, t=25, b=10))
+            theme.plot(figure, height=330)
 
     source_yield = queries.get_discovery_source_yield(database_path)
     st.markdown("#### Source yield")
@@ -68,7 +82,7 @@ def render(database_path: str | Path) -> None:
             labels={"source": "Discovery source", "symbols": "Distinct symbols"},
         )
         figure.update_layout(margin=dict(l=10, r=10, t=20, b=10))
-        st.plotly_chart(figure, use_container_width=True)
+        theme.plot(figure)
 
     reason_col, status_col = st.columns([2, 1])
     with reason_col:
@@ -81,7 +95,7 @@ def render(database_path: str | Path) -> None:
                 ["symbol", "source", "discovery_reason", "fast_score", "discovered_at"]
             ].copy()
             display["discovered_at"] = display["discovered_at"].map(format_et)
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.dataframe(display, width="stretch", hide_index=True)
             st.caption("discovery_reason is shown verbatim from SQLite.")
 
     with status_col:
@@ -99,7 +113,7 @@ def render(database_path: str | Path) -> None:
                 display[
                     ["source", "status", "disable_reason", "symbols_contributed", "probed_at"]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
             st.caption("A 403 from most-actives is expected and is reported as unavailable, not as a dashboard error.")

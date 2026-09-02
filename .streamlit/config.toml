@@ -1,0 +1,15 @@
+# Alpha Council dashboard - default theme (the council chamber).
+#
+# These values match dashboard/theme.py DARK exactly so the very first
+# paint is on-brand with no flash; the in-app toggle re-points the same
+# options at the LIGHT palette at runtime.
+
+[theme]
+base = "dark"
+primaryColor = "#D4AF37"
+backgroundColor = "#070B15"
+secondaryBackgroundColor = "#0C1424"
+textColor = "#EDE7D8"
+
+[browser]
+gatherUsageStats = false
