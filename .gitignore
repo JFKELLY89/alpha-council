@@ -71,6 +71,12 @@ Thumbs.db
 
 
 # =========================
+# Local-only submission working files
+# =========================
+VIDEO_SCRIPT.md
+
+
+# =========================
 # Build artifacts
 # =========================
 build/
