@@ -295,7 +295,17 @@ class ChainService:
                 return None
 
         vol = (snap.get("dailyBar") or {}).get("v") or trade.get("s") or 0
-        if filters.min_volume > 0 and int(vol or 0) < filters.min_volume:
+        # Same-day volume is a SECOND liquidity gate on legs whose OI the
+        # authoritative source just confirmed — and it culls exactly the
+        # ITM strikes the long-delta band needs. Measured live 09-02:
+        # LLY/COST/HD lost every 0.52-0.72-delta leg to thin day volume
+        # and produced zero structures. Volume stands alone only when the
+        # OI gate stood down.
+        oi_confirmed = (oi_map is not None and oi is not None
+                        and filters.min_open_interest > 0
+                        and int(oi) >= filters.min_open_interest)
+        if (filters.min_volume > 0 and int(vol or 0) < filters.min_volume
+                and not oi_confirmed):
             result.rejections.append((occ, "OPT_VOLUME_TOO_LOW", str(vol)))
             return None
 
