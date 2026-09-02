@@ -348,7 +348,12 @@ models:
   # evidence cap 8k -> 12k (the spec's first-priority upgrade) and the
   # scenario generator restored to Sol (v2.5 §16's original assignment,
   # which had been downgraded for a cost concern that never materialized).
-  red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 12000}
+  # max_tokens 16384: measured live 2026-09-02 - the model reasons before
+  # it answers, and at the 4096 default it burned the whole budget on
+  # thinking and returned no text block at all (out_tokens=4096, empty
+  # response, twice). The 'effort' param is rejected by the API and
+  # auto-dropped; the response budget is the control that matters.
+  red_team:            {provider: anthropic, model: claude-sonnet-5, effort: high,      evidence_cap_tokens: 12000, max_tokens: 16384}
   scenario_generator:  {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 3500}
   lessons:             {provider: openai,    model: gpt-5.6-sol,     reasoning: high,   evidence_cap_tokens: 12000}
   briefing:            {provider: openai,    model: gpt-5.6-sol,     reasoning: medium, evidence_cap_tokens: 6000}
