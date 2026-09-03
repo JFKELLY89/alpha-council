@@ -393,9 +393,11 @@ def test_hard_cap_binds_above_two_percent():
 
 
 def test_red_team_can_shrink_but_not_grow():
+    # 09-03 policy: a shrink floors at ONE spread when the original
+    # request afforded one — it no longer rounds to zero by granularity.
     smaller = size_position(100_000.0, 1.25, 520.0, red_team_max_risk_pct=0.5)
-    assert smaller.binding_cap == "red_team"
-    assert smaller.approved_qty == 0    # $500 budget, $520 per spread
+    assert smaller.binding_cap == "min_one_spread"
+    assert smaller.approved_qty == 1    # $500 budget, $520 per spread
 
     larger = size_position(100_000.0, 1.25, 520.0, red_team_max_risk_pct=5.0)
     assert larger.binding_cap == "requested"
@@ -515,3 +517,33 @@ def test_event_track_uses_event_score_floor():
     ev = rc.evaluate(_request(final_opportunity_score=66.5),
                      _portfolio(), now=NOW)
     assert "RISK_SCORE_FLOOR" in _rule_ids(ev)
+
+
+# ======================================================================
+# sizing granularity: a reduction floors at one spread (09-03 live)
+# ======================================================================
+
+def test_reduction_floors_at_one_spread_not_zero():
+    """CRCL 09-03: approved by every council stage, then RISK_QTY_ZERO'd
+    a $578 spread against its Red-Team-halved budget. A reduction whose
+    original request afforded a spread approves one, not zero."""
+    s = size_position(equity=100_000, desired_risk_pct=0.75,
+                      max_loss_per_spread=578.0, red_team_max_risk_pct=0.4)
+    assert s.approved_qty == 1
+    assert s.binding_cap == "min_one_spread"
+    assert s.budget_dollars == pytest.approx(750.0)
+
+
+def test_min_one_spread_never_breaches_hard_cap():
+    # 2% of 25k = $500 < one $578 spread: stays zero even though the
+    # original 3% request would afford one.
+    s = size_position(equity=25_000, desired_risk_pct=3.0,
+                      max_loss_per_spread=578.0, red_team_max_risk_pct=0.4)
+    assert s.approved_qty == 0
+
+
+def test_min_one_spread_requires_original_request_to_afford_it():
+    # The PM's own request was too small for a single spread: reject.
+    s = size_position(equity=100_000, desired_risk_pct=0.3,
+                      max_loss_per_spread=578.0, red_team_max_risk_pct=0.2)
+    assert s.approved_qty == 0

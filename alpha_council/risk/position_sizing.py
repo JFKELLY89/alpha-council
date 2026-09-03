@@ -79,6 +79,21 @@ def size_position(equity: float, desired_risk_pct: float,
 
     requested_qty = int(math.floor(requested_dollars / max_loss_per_spread))
     approved_qty = int(math.floor(budget / max_loss_per_spread))
+
+    # A reduction floors at ONE spread; it does not round to zero. When
+    # the PM's original request affords at least one spread and one fits
+    # under the hard cap, a smaller binding cap (typically the Red Team's)
+    # approves exactly one — anything else turns "proceed at reduced size"
+    # into a veto by granularity. Measured live 09-03: CRCL was approved
+    # by every council stage, then RISK_QTY_ZERO'd a $578 spread against
+    # its halved budget. The walk ceiling reverts to the original request
+    # so attempts 2 and 3 still exist; portfolio caps below still veto.
+    if (approved_qty == 0 and requested_qty >= 1
+            and max_loss_per_spread <= hard_cap_dollars):
+        approved_qty = 1
+        binding = "min_one_spread"
+        budget = min(requested_dollars, hard_cap_dollars)
+
     if max_qty is not None and approved_qty > max_qty:
         approved_qty, binding = max_qty, "operator_max_qty"
     # requested_qty stays exactly what the PM's percentage implies: the
