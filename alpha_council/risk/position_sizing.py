@@ -80,26 +80,37 @@ def size_position(equity: float, desired_risk_pct: float,
     requested_qty = int(math.floor(requested_dollars / max_loss_per_spread))
     approved_qty = int(math.floor(budget / max_loss_per_spread))
 
-    # A reduction floors at ONE spread; it does not round to zero. When
-    # the PM's original request affords at least one spread and one fits
-    # under the hard cap, a smaller binding cap (typically the Red Team's)
-    # approves exactly one — anything else turns "proceed at reduced size"
-    # into a veto by granularity. Measured live 09-03: CRCL was approved
-    # by every council stage, then RISK_QTY_ZERO'd a $578 spread against
-    # its halved budget. The walk ceiling reverts to the original request
-    # so attempts 2 and 3 still exist; portfolio caps below still veto.
-    if (approved_qty == 0 and requested_qty >= 1
-            and max_loss_per_spread <= hard_cap_dollars):
+    # A reduction floors at ONE spread; it does not round to zero. One
+    # spread is the minimum executable unit: a risk percentage below one
+    # spread's cost is a granularity collision, not an instruction to
+    # stand down a trade the full council approved. Measured live 09-03:
+    # CRCL ($578) and COIN ($597) were approved by every stage and
+    # RISK_QTY_ZERO'd; MSTR then re-proposed with a deliberately better
+    # $871 structure and died the same way because the revision had
+    # already lowered desired risk to the Red Team's number, so even the
+    # "requested" dollars afforded zero. Guards: one spread must fit the
+    # hard cap, and the request must be at least a quarter spread (a
+    # sub-quarter ask is a genuine stand-down, not granularity). The walk
+    # ceiling keeps ~10% headroom so attempts 2 and 3 still exist;
+    # portfolio caps below still veto.
+    if (approved_qty == 0 and requested_dollars > 0
+            and max_loss_per_spread <= hard_cap_dollars
+            and requested_dollars >= 0.25 * max_loss_per_spread):
         approved_qty = 1
         binding = "min_one_spread"
-        budget = min(requested_dollars, hard_cap_dollars)
+        budget = min(hard_cap_dollars,
+                     max(requested_dollars, 1.10 * max_loss_per_spread))
 
     if max_qty is not None and approved_qty > max_qty:
         approved_qty, binding = max_qty, "operator_max_qty"
     # requested_qty stays exactly what the PM's percentage implies: the
-    # attribution decomposition depends on it being unclamped.
+    # attribution decomposition depends on it being unclamped — including
+    # under the one-spread floor, where requested 0 vs approved 1 records
+    # that the floor, not the PM, sized the trade.
 
-    approved_qty = max(0, min(approved_qty, requested_qty))
+    if binding != "min_one_spread":
+        approved_qty = max(0, min(approved_qty, requested_qty))
+    approved_qty = max(0, approved_qty)
 
     return SizingResult(
         requested_qty=requested_qty,

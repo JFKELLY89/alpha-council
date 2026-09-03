@@ -49,13 +49,17 @@ class RiskEvaluation(StrictModel):
 
     @model_validator(mode="after")
     def _decision_coherent(self) -> "RiskEvaluation":
-        if self.approved_qty > self.requested_qty:
+        # The one-spread floor (09-03) may approve a single spread when
+        # the percentage-implied request floors to zero; growth beyond
+        # one spread over the request remains incoherent.
+        if self.approved_qty > max(self.requested_qty, 1):
             raise ValueError("approved quantity cannot exceed the request")
 
         if self.decision.blocks_trade and self.approved_qty != 0:
             raise ValueError(f"{self.decision} requires approved_qty=0")
         if self.decision is RiskDecision.APPROVE:
-            if self.approved_qty != self.requested_qty:
+            floored_to_one = self.requested_qty == 0 and self.approved_qty == 1
+            if self.approved_qty != self.requested_qty and not floored_to_one:
                 raise ValueError("APPROVE means the full request was granted; "
                                  "use RESIZE otherwise")
             if any(v.severity in (Severity.BLOCK, Severity.HALT)

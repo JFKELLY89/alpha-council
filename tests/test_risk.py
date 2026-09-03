@@ -432,9 +432,19 @@ def test_reject_duplicate_order():
 
 
 def test_qty_zero_when_a_spread_costs_more_than_the_budget():
+    # 09-03 policy: a viable ask (>= quarter spread) floors at one
+    # spread instead of rejecting by granularity...
     expensive = _structure(limit=5.20, width=10.0)
     ev = _rc().evaluate(
         _request(structure=expensive, desired_risk_pct=0.4),
+        _portfolio(), now=NOW)
+    assert ev.decision is not RiskDecision.REJECT
+    assert ev.approved_qty == 1
+
+    # ...but an ask below a quarter of one spread is a genuine
+    # stand-down and still rejects.
+    ev = _rc().evaluate(
+        _request(structure=expensive, desired_risk_pct=0.1),
         _portfolio(), now=NOW)
     assert ev.decision is RiskDecision.REJECT
     assert "RISK_QTY_ZERO" in _rule_ids(ev)
@@ -542,8 +552,21 @@ def test_min_one_spread_never_breaches_hard_cap():
     assert s.approved_qty == 0
 
 
-def test_min_one_spread_requires_original_request_to_afford_it():
-    # The PM's own request was too small for a single spread: reject.
+def test_min_one_spread_covers_post_revision_requests():
+    """MSTR 09-03 15:03Z: the revision had already lowered desired risk
+    to the Red Team's 0.3% and picked a deliberately better $871
+    structure, so even 'requested' afforded zero. Trade intent plus a
+    quarter-spread ask floors at one."""
     s = size_position(equity=100_000, desired_risk_pct=0.3,
-                      max_loss_per_spread=578.0, red_team_max_risk_pct=0.2)
+                      max_loss_per_spread=871.0, red_team_max_risk_pct=0.3)
+    assert s.approved_qty == 1
+    assert s.binding_cap == "min_one_spread"
+    assert s.requested_qty == 0          # attribution sees the floor
+    assert s.budget_dollars == pytest.approx(958.1)  # 10% walk headroom
+
+
+def test_sub_quarter_spread_request_is_a_stand_down():
+    # An ask below a quarter of one spread is a genuine stand-down.
+    s = size_position(equity=100_000, desired_risk_pct=0.1,
+                      max_loss_per_spread=578.0, red_team_max_risk_pct=0.1)
     assert s.approved_qty == 0
