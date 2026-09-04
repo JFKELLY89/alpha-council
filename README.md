@@ -57,17 +57,17 @@ flowchart TD
 | Red Team | Claude (claude-sonnet-5) | PASS/MODIFY/VETO + risk score + confidence adjustment |
 | Lessons / Evolution | GPT (gpt-5.6-sol) | Evidence-for/against lessons; bounded Challenger configs |
 
-## What actually happened on the first live day (2026-09-02)
+## What actually happened across the two live sessions (2026-09-02 → 09-03)
 
 We publish the real numbers because the honest ones are the interesting ones:
 
-- 28 councils convened across the session; 25 reached the Portfolio Manager; **7 trade proposals**, the rest were reasoned abstains.
-- The Claude Red Team issued **3 MODIFY verdicts** with real critiques ("catalyst-free momentum trade whose own scenario table loses in STALL and reaches max loss in REVERSAL").
-- Two PMs withdrew on revision after reading the critique. One (IREN) kept the trade, cut confidence 0.66 → 0.51 and halved its size — and the Risk Constitution rejected it: *PM confidence 0.51 below the tier floor 0.52*. One point short, and the floor held.
-- **Zero alpha trades were forced.** On a catalyst-thin tape, every layer did its job, including the last one.
-- One deliberate calibration lifecycle ran through the full journaled path (open walked 3 limit rungs to a fill, close filled on the first credit rung; realized −$9.00), giving us measured fill bias: **+$0.13 open, +$0.005 close** on a ~$5.30 debit spread.
-- Post-close, Alpha Evolution reviewed 50 decisions and generated 3 lessons — then **declined to propose a Challenger**: "insufficient outcome evidence — the period contains only one closed CALIBRATION trade." The learning loop refusing to overfit its first day is the system working.
-- Total GenAI spend for the day: **$2.30** (149 OpenAI calls, 6 Anthropic calls).
+- **55 councils** convened over two sessions; **24 Portfolio Manager trade proposals**, the rest reasoned abstains with the objection named.
+- The Claude Red Team completed **19 reviews: 18 MODIFY, 1 VETO**, with real critiques ("catalyst-free momentum trade whose own scenario table loses in STALL and reaches max loss in REVERSAL"). Mean confidence adjustment −0.14; every MODIFY capped risk below the PM's ask.
+- **Day one: zero alpha trades.** On a catalyst-thin tape PMs withdrew on revision, and the Constitution rejected the one survivor (IREN) at *PM confidence 0.51 below the tier floor 0.52*. One point short, and the floor held.
+- **Day two: four council-approved alpha trades, all journaled end to end** — BMNR ×2, MSTR ×1, CLSK ×3, JNJ ×1 — after two operator decisions made on the record that morning: continuation-conviction setups may proceed at *reduced* size rather than die to stall exposure, and a reduction floors at **one spread** instead of rounding to zero (two fully approved trades had been vetoed by granularity alone). The Constitution still rejected an MSTR add-on against an already crypto-heavy book, and the Red Team issued its first VETO.
+- **Realized P&L: −$251** across five journaled lifecycles (BMNR +$12, MSTR +$10, CLSK −$72, JNJ −$192, calibration −$9). Part of the two losses is spread-crossing cost from the forced 15:45 competition flatten, not adverse movement. Fill calibration across 11 measured fills: mean bias **−$0.06** vs the indicative-adjusted mid.
+- Alpha Evolution ran two post-close cycles (50 and 77 decisions reviewed, 9 lessons) and **declined to propose a Challenger both times** — the second time naming the confound: "numerous configuration/tier versions were active during the period." A learning loop that can tell a small sample from a contaminated one is the system working.
+- Total GenAI spend for the whole competition: **$7.74 of $100** (392 OpenAI calls, 21 Anthropic calls). 15,982 gate rejections across 948 symbols were decided by arithmetic, not models.
 
 ## Market-data honesty (IEX + Indicative)
 
@@ -97,7 +97,7 @@ Requirements: Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), an Alpaca **pap
 ```bash
 cp .env.example .env        # fill in keys; ALPACA_PAPER_TRADE stays true
 uv sync
-uv run python -m pytest -q  # 517 tests
+uv run python -m pytest -q  # 526 tests
 ```
 
 Run the desk (scheduler drives the full trading day — scans, councils, monitor, flatten, post-close evolution):
@@ -106,11 +106,13 @@ Run the desk (scheduler drives the full trading day — scans, councils, monitor
 uv run python scripts/run_alpha_council.py --max-trades 10
 ```
 
-Dashboard (dark/light themed, 9 tabs: Command Center, Discovery, Council, Gate Lab, Counterfactual Lab, Execution Quality, Evolution, Audit, Config):
+Dashboard (dark/light themed, 9 tabs: Command Center, Discovery Funnel, Scanner, Council Decision, Counterfactual Lab, Gate Lab, Execution Quality, Alpha Evolution, Audit):
 
 ```bash
 uv run streamlit run dashboard/app.py
 ```
+
+Any tab can be addressed directly for screenshots or recording with `?tab=<slug>` (label lower-cased, spaces as underscores — e.g. `http://localhost:8501/?tab=counterfactual_lab`), which renders that view without the tab strip.
 
 Operational scripts:
 
@@ -137,7 +139,7 @@ alpha_council/
 config/           scoring.yaml, risk_constitution.yaml, event_calendar.yaml, universe.yaml
 dashboard/        Streamlit app + theme
 scripts/          run_alpha_council.py, calibration_trade.py, close_all.py, ...
-tests/            517 tests
+tests/            526 tests
 ```
 
 ## Honest framing
