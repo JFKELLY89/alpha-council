@@ -69,6 +69,32 @@ We publish the real numbers because the honest ones are the interesting ones:
 - Alpha Evolution ran two post-close cycles (50 and 77 decisions reviewed, 9 lessons) and **declined to propose a Challenger both times** — the second time naming the confound: "numerous configuration/tier versions were active during the period." A learning loop that can tell a small sample from a contaminated one is the system working.
 - Total GenAI spend for the whole competition: **$7.74 of $100** (392 OpenAI calls, 21 Anthropic calls). 15,982 gate rejections across 948 symbols were decided by arithmetic, not models.
 
+## The dashboard, on the real rows
+
+Captured after the final session (2026-09-03), dark council theme.
+
+**Command Center** — account, exposure, spend, and the Constitution's state.
+
+![Command Center](docs/screenshots/command_center.png)
+
+**Council Decision** — the MSTR lifecycle: evidence, three analysts, the PM's thesis and invalidation rules, Claude's MODIFY, the revision at reduced size, the Constitution's sizing, and the fill.
+
+![Council Decision — MSTR](docs/screenshots/council_decision_mstr.png)
+
+**Counterfactual Lab** — three marked variants per decision and the selection-vs-sizing attribution per governance layer.
+
+![Counterfactual Lab](docs/screenshots/counterfactual_lab.png)
+
+**Gate Lab** — what every deterministic gate rejected, and what those refusals were worth.
+
+![Gate Lab](docs/screenshots/gate_lab.png)
+
+**Execution Quality** and **Alpha Evolution** — limit-walk behavior and measured fill bias; lessons with evidence for and against, and the promotion gate that stays closed.
+
+![Execution Quality](docs/screenshots/execution_quality.png)
+
+![Alpha Evolution](docs/screenshots/alpha_evolution.png)
+
 ## Market-data honesty (IEX + Indicative)
 
 Alpha Council runs on Alpaca's free feeds and treats their limits as *measured engineering inputs*, not fine print:

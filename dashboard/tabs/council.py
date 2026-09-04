@@ -78,11 +78,19 @@ def _decision_selector(decisions: pd.DataFrame) -> str:
         row.decision_id: f"{row.symbol} · {row.state} · {format_et(row.created_at)} · {row.decision_id}"
         for row in decisions.itertuples()
     }
+    ids = decisions["decision_id"].tolist()
+    # ?decision=<id> pins the initial selection so a URL can open one
+    # lifecycle directly (screenshots, recording, sharing a decision).
+    wanted = str(st.query_params.get("decision", ""))
+    kwargs: dict[str, Any] = {}
+    if wanted in ids and "council_decision_id" not in st.session_state:
+        kwargs["index"] = ids.index(wanted)
     return st.selectbox(
         "Decision",
-        decisions["decision_id"].tolist(),
+        ids,
         format_func=lambda value: labels[value],
         key="council_decision_id",
+        **kwargs,
     )
 
 

@@ -178,6 +178,15 @@ SELECT
 FROM position_snapshots AS p
 JOIN latest_capture AS latest ON latest.captured_at = p.captured_at
 WHERE p.qty <> 0
+  -- A snapshot outlives its trade: the last capture before the 15:45
+  -- flatten still listed every book position after the books were
+  -- flat. Only symbols with a journaled OPEN trade are active.
+  AND EXISTS (
+      SELECT 1
+      FROM trade_journal AS t
+      JOIN decisions AS d ON d.decision_id = t.decision_id
+      WHERE t.status = 'OPEN' AND d.symbol = p.symbol
+  )
 ORDER BY ABS(COALESCE(p.market_value, 0)) DESC, p.symbol
 """
 
