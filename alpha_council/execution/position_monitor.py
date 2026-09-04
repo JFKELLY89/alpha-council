@@ -60,6 +60,10 @@ class MonitoredPosition:
     invalidation: list[InvalidationRule] = field(default_factory=list)
     horizon_days: int = 5
     track: CandidateTrack = CandidateTrack.MOMENTUM
+    # First-breach time per invalidation rule index, carried between polls
+    # so a rule with a confirmation window ("for 30 consecutive minutes")
+    # fires only after a continuous breach, never on one tick.
+    breach_since: dict[int, datetime] = field(default_factory=dict)
 
     @property
     def direction(self) -> Direction:
@@ -144,8 +148,11 @@ def evaluate_exit(position: MonitoredPosition, underlying: float,
     # --- PM invalidation ---------------------------------------------
     evaluated.append("UNDERLYING_INVALIDATION")
     if primary.get("honor_pm_invalidation_rules", True):
-        fired = check_invalidation(position.invalidation, underlying, vwap,
-                                   position.opened_at, now)
+        fired = check_invalidation(
+            position.invalidation, underlying, vwap, position.opened_at, now,
+            breach_since=position.breach_since,
+            default_confirm_minutes=float(
+                primary.get("vwap_invalidation_confirm_minutes", 30)))
         if fired is not None:
             return ExitDecision(True, ExitReason.UNDERLYING_INVALIDATION,
                                 fired, triggers_evaluated=evaluated)
@@ -184,36 +191,72 @@ def evaluate_exit(position: MonitoredPosition, underlying: float,
 
 def check_invalidation(rules: Sequence[InvalidationRule], underlying: float,
                        vwap: float | None, opened_at: datetime,
-                       now: datetime) -> str | None:
+                       now: datetime,
+                       breach_since: dict[int, datetime] | None = None,
+                       default_confirm_minutes: float = 0.0) -> str | None:
     """Evaluate PM invalidation rules against the underlying.
 
     Rules referencing anything the system cannot observe in real time are
     skipped rather than guessed at. The PM prompt forbids option-price
     rules for exactly this reason.
+
+    A VWAP rule compares the UNDERLYING to the session VWAP, falling back
+    to the PM's reference level when no session VWAP is available. (It
+    used to compare the session VWAP to the PM's snapshot of it, which
+    fired the moment the two drifted a tick apart - DRAM, 2026-09-04,
+    closed 19 seconds after entry.) A breach must hold for a confirmation
+    window before it fires: the minutes the PM wrote into the rule ("for
+    30 consecutive minutes"), else ``default_confirm_minutes`` for VWAP
+    rules and immediately for PRICE and TIME rules. ``breach_since``
+    carries first-breach times between polls; a poll without a breach
+    resets the rule's clock.
     """
-    for rule in rules:
+    state = breach_since if breach_since is not None else {}
+    for index, rule in enumerate(rules):
         if rule.threshold is None or rule.comparator is None:
             continue
 
         if rule.rule_type == "PRICE":
-            observed = underlying
+            observed, reference = underlying, rule.threshold
+            confirm = _confirm_minutes(rule.description, 0.0)
         elif rule.rule_type == "VWAP":
-            if vwap is None:
-                continue
-            observed = vwap
+            observed = underlying
+            reference = vwap if vwap is not None else rule.threshold
+            confirm = _confirm_minutes(rule.description,
+                                       default_confirm_minutes)
         elif rule.rule_type == "TIME":
-            elapsed_days = (now - opened_at).total_seconds() / 86400.0
-            observed = elapsed_days
+            observed = (now - opened_at).total_seconds() / 86400.0
+            reference = rule.threshold
+            confirm = 0.0
         else:
             # CATALYST and COMPOSITE rules need evidence the monitor does
             # not carry. They are handled by the council, not here.
             continue
 
-        if _comparator_fires(observed, rule.comparator, rule.threshold):
-            return (f"{rule.rule_type} invalidation: {observed:.2f} "
-                    f"{rule.comparator} {rule.threshold:.2f} "
-                    f"({rule.description[:60]})")
+        if not _comparator_fires(observed, rule.comparator, reference):
+            state.pop(index, None)          # a breach must be continuous
+            continue
+        since = state.setdefault(index, now)
+        held_minutes = (now - since).total_seconds() / 60.0
+        if held_minutes < confirm:
+            continue                        # breached, not yet confirmed
+        return (f"{rule.rule_type} invalidation: {observed:.2f} "
+                f"{rule.comparator} {reference:.2f} held {held_minutes:.0f}m "
+                f"({rule.description[:60]})")
     return None
+
+
+def _confirm_minutes(description: str, default: float) -> float:
+    """Minutes a breach must persist before the rule fires.
+
+    Honors the PM's own wording ("for 30 consecutive minutes", "for 15
+    min") when present; otherwise ``default``.
+    """
+    import re
+
+    match = re.search(r"\bfor\s+(\d+)\s*(?:consecutive\s+)?min",
+                      description or "", re.IGNORECASE)
+    return float(match.group(1)) if match else default
 
 
 def _comparator_fires(observed: float, comparator: str,

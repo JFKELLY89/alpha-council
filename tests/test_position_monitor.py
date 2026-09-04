@@ -256,11 +256,83 @@ def test_price_invalidation_fires():
     assert not _evaluate(_position(rules=rules), underlying=198.5).should_exit
 
 
-def test_vwap_invalidation_requires_a_vwap():
+def test_vwap_rule_compares_the_underlying_to_the_vwap():
     rules = [InvalidationRule(rule_type="VWAP", description="lost vwap",
                               threshold=203.0, comparator="LT")]
+    # underlying above the live VWAP: no breach, whatever the PM's snapshot
+    assert check_invalidation(rules, 204.0, 202.0, NOW, NOW) is None
+    # underlying below the live VWAP: breach (no window written -> now)
+    assert check_invalidation(rules, 201.0, 202.0, NOW, NOW) is not None
+    # no session VWAP: the PM's reference level stands in
     assert check_invalidation(rules, 204.0, None, NOW, NOW) is None
-    assert check_invalidation(rules, 204.0, 202.0, NOW, NOW) is not None
+    assert check_invalidation(rules, 202.0, None, NOW, NOW) is not None
+
+
+DRAM_RULE = InvalidationRule(
+    rule_type="VWAP", comparator="LT", threshold=57.7984,
+    description="Exit if DRAM remains below the 57.7984 VWAP reference "
+                "for 30 consecutive minutes after entry.")
+
+
+def test_dram_regression_vwap_drift_is_not_a_breach():
+    """2026-09-04: closed 19s after entry because the session VWAP
+    (57.7983) was compared with the PM's snapshot (57.7984)."""
+    position = _position(rules=[DRAM_RULE], opened_at=NOW)
+    decision = evaluate_exit(position, 57.80, NOW + timedelta(seconds=19),
+                             RISK_CFG, vwap=57.7983)
+    assert not decision.should_exit
+    assert position.breach_since == {}
+
+
+def test_vwap_breach_must_persist_for_the_written_window():
+    rules = [DRAM_RULE]
+    state: dict[int, datetime] = {}
+    t = lambda **kw: NOW + timedelta(**kw)  # noqa: E731
+    # first breach 19 seconds after entry: armed, not fired
+    assert check_invalidation(rules, 57.79, 57.80, NOW, t(seconds=19),
+                              state) is None
+    assert 0 in state
+    # twenty minutes below: still inside the 30-minute window
+    assert check_invalidation(rules, 57.70, 57.80, NOW, t(minutes=20),
+                              state) is None
+    # one poll back above VWAP resets the clock
+    assert check_invalidation(rules, 57.85, 57.80, NOW, t(minutes=25),
+                              state) is None
+    assert 0 not in state
+    # below again for a continuous 30 minutes: fires, and says how long
+    assert check_invalidation(rules, 57.70, 57.80, NOW, t(minutes=26),
+                              state) is None
+    fired = check_invalidation(rules, 57.70, 57.80, NOW, t(minutes=56),
+                               state)
+    assert fired is not None and "held 30m" in fired
+
+
+def test_vwap_rule_without_written_window_uses_config_default():
+    rules = [InvalidationRule(rule_type="VWAP", description="lost vwap",
+                              threshold=203.0, comparator="LT")]
+    position = _position(rules=rules)
+    primary = {**RISK_CFG["exits"]["primary"],
+               "vwap_invalidation_confirm_minutes": 10}
+    cfg = {**RISK_CFG, "exits": {**RISK_CFG["exits"], "primary": primary}}
+    assert not evaluate_exit(position, 201.0, NOW, cfg,
+                             vwap=202.0).should_exit
+    later = evaluate_exit(position, 201.0, NOW + timedelta(minutes=10), cfg,
+                          vwap=202.0)
+    assert later.should_exit
+    assert later.reason is ExitReason.UNDERLYING_INVALIDATION
+
+
+def test_price_rule_honors_a_written_window_only():
+    immediate = [InvalidationRule(rule_type="PRICE", description="below support",
+                                  threshold=198.0, comparator="LT")]
+    assert check_invalidation(immediate, 197.5, None, NOW, NOW) is not None
+    windowed = [InvalidationRule(rule_type="PRICE", threshold=198.0,
+                                 comparator="LT",
+                                 description="below support for 15 min")]
+    state: dict[int, datetime] = {}
+    assert check_invalidation(windowed, 197.5, None, NOW, NOW, state) is None
+    assert check_invalidation(windowed, 197.5, None, NOW,
+                              NOW + timedelta(minutes=15), state) is not None
 
 
 def test_time_invalidation_measures_elapsed_days():

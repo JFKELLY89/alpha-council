@@ -92,6 +92,11 @@ exits:
     underlying_target_at_short_strike: true
     honor_pm_invalidation_rules: true
     time_stop_dte: 2
+    # A VWAP invalidation must hold continuously this long before it
+    # fires, unless the PM wrote a window into the rule ("for 30
+    # consecutive minutes"). One tick below VWAP is noise, not a thesis
+    # failure.
+    vwap_invalidation_confirm_minutes: 30
   secondary:
     profit_target_pct_of_max: 0.55
     premium_stop_pct_of_entry: 0.45
