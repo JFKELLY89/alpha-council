@@ -89,7 +89,18 @@ def main() -> None:
         audit.render,
     ]
 
+    # Presentation mode: ?tab=<slug> renders one tab's body without the tab
+    # strip, so a URL can address any view for screenshots and recording
+    # (Streamlit tabs cannot be selected programmatically). Slugs are the
+    # labels lower-cased with spaces as underscores, e.g. ?tab=gate_lab.
+    slugs = {label.lower().replace(" ", "_"): index
+             for index, label in enumerate(labels)}
+    wanted = str(st.query_params.get("tab", "")).lower().replace(" ", "_")
+
     try:
+        if wanted in slugs:
+            renderers[slugs[wanted]](database_path)
+            return
         tabs = st.tabs(labels)
         for container, renderer in zip(tabs, renderers, strict=True):
             with container:
