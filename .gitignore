@@ -85,3 +85,10 @@ dist/
 data/
 
 data/probe_results.json
+
+# internal working documents, kept local only
+CODE_REVIEW_2026-09-01.md
+DASHBOARD_BRIEF.md
+JSON_PAYLOAD_REFERENCE.md
+MONDAY_RUNBOOK_v3.md
+SUBMISSION_PLAN_2026-09-02.md

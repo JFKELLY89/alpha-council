@@ -176,5 +176,5 @@ The calibration and evolution loop is presented as **instrumentation that would 
 
 - `Alpha_Council_v2_4_Implementation_Specification.md` — the governing spec (funnel, council, constitution, execution)
 - `Alpha_Council_v2_5_Alpha_Evolution_Implementation_Addendum.md` — the learning layer
-- `CODE_REVIEW_2026-09-01.md` — pre-competition whole-of-model review register
-- `MONDAY_RUNBOOK_v3.md` — operator runbook
+- `SUBMISSION_WRITEUP.md` — the build mapped to the four judging criteria, with the live numbers
+- `docs/SUBMISSION_FORM.md` — the submission summary
