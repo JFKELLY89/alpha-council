@@ -4,6 +4,8 @@
 
 Built for the Alpaca AI Trading Agents Hackathon. Paper trading only, enforced in code.
 
+**▶ Demo video (3 min):** https://youtu.be/z-F0h_6jOp0
+
 > Most AI trading agents tell you why they made a trade. Alpha Council shows how it found the opportunity, measures whether each decision layer added value, and proves what its risk gates saved or cost — including on trades it refused to take.
 
 ---

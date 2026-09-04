@@ -2,6 +2,8 @@
 
 *Alpaca AI Trading Agents Hackathon · Team JFKELLY89 · September 2026*
 
+**Demo video:** https://youtu.be/z-F0h_6jOp0 · **Code:** https://github.com/JFKELLY89/alpha-council
+
 Alpha Council is an autonomous, options-native paper-trading desk with a governance chain modeled on a real trading floor: a deterministic quant funnel finds candidates, GPT analysts and a GPT portfolio manager debate and propose, a Claude red team attacks the proposal, a deterministic Risk Constitution has the final, un-overridable word — and a measurement layer records what every one of those decisions was worth. This document maps the build to the four judging criteria.
 
 ---
