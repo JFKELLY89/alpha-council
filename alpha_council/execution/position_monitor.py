@@ -39,7 +39,8 @@ from alpha_council.models.enums import (
 )
 from alpha_council.models.trading import InvalidationRule, OptionStructure
 from alpha_council.utils.time import (
-    COMPETITION_FLATTEN_ET,
+    competition_flatten_at,
+    is_flatten_due,
     iso_utc,
     to_et,
     utc_now,
@@ -107,8 +108,11 @@ def evaluate_exit(position: MonitoredPosition, underlying: float,
     secondary = exits.get("secondary", {})
     evaluated: list[str] = []
 
-    # --- competition flatten: unconditional -------------------------
-    if to_et(now) >= COMPETITION_FLATTEN_ET:
+    # --- competition flatten: unconditional, but only on its date ----
+    # The anchor comes from hard.competition_flatten_at (null disables
+    # it). A bare ">=" against a past anchor would close every position
+    # opened after the competition within one poll.
+    if is_flatten_due(now, competition_flatten_at(config)):
         return ExitDecision(True, ExitReason.COMPETITION_FLATTEN,
                             "competition flatten time reached",
                             triggers_evaluated=["COMPETITION_FLATTEN"])

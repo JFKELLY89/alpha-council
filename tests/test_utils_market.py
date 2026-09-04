@@ -94,6 +94,27 @@ def test_competition_sessions_remaining():
     assert sessions_remaining(datetime(2026, 9, 4, 10, 0, tzinfo=ET)) == 0
 
 
+def test_competition_flatten_anchor_contract():
+    from alpha_council.utils.time import (
+        COMPETITION_FLATTEN_ET,
+        competition_flatten_at,
+        is_flatten_due,
+    )
+    # absent key -> spec anchor; explicit null -> disabled; ISO -> parsed
+    assert competition_flatten_at(None) == COMPETITION_FLATTEN_ET
+    assert competition_flatten_at({"hard": {}}) == COMPETITION_FLATTEN_ET
+    assert competition_flatten_at(
+        {"hard": {"competition_flatten_at": None}}) is None
+    parsed = competition_flatten_at(
+        {"hard": {"competition_flatten_at": "2026-09-03T15:45:00-04:00"}})
+    assert parsed == COMPETITION_FLATTEN_ET
+    # due only on the anchor's own date, at or after the instant
+    assert is_flatten_due(datetime(2026, 9, 3, 15, 45, tzinfo=ET), parsed)
+    assert not is_flatten_due(datetime(2026, 9, 3, 15, 44, tzinfo=ET), parsed)
+    assert not is_flatten_due(datetime(2026, 9, 4, 9, 31, tzinfo=ET), parsed)
+    assert not is_flatten_due(datetime(2026, 9, 3, 15, 46, tzinfo=ET), None)
+
+
 def test_previous_trading_days_skips_the_weekend():
     days = previous_trading_days(3, before=date(2026, 8, 31))
     assert days == [date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)]

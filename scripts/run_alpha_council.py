@@ -84,6 +84,7 @@ from alpha_council.settings import get_settings, load_yaml  # noqa: E402
 from alpha_council.utils.time import (  # noqa: E402
     et_now,
     is_trading_day,
+    competition_flatten_at,
     sessions_remaining,
     utc_now,
 )
@@ -106,6 +107,10 @@ async def run(args: argparse.Namespace) -> int:
 
     scoring = load_yaml("scoring")
     risk_cfg = load_yaml("risk_constitution")
+    if args.no_flatten:
+        # Runtime override only: the committed Risk Constitution keeps its
+        # competition anchor; this process never force-closes at 15:45.
+        risk_cfg.setdefault("hard", {})["competition_flatten_at"] = None
     universe_cfg = load_yaml("universe")
     calendar = load_yaml("event_calendar")
     config_version = scoring.get("config_version", settings.config_version)
@@ -118,6 +123,10 @@ async def run(args: argparse.Namespace) -> int:
     say(f"  mode         : {'DRY RUN — nothing will be submitted' if args.dry_run else 'LIVE PAPER TRADING'}")
     if args.max_trades is not None:
         say(f"  trade ceiling: {args.max_trades}")
+    flatten_at = competition_flatten_at(risk_cfg)
+    say("  flatten      : "
+        + ("disabled - positions carry overnight" if flatten_at is None
+           else f"{flatten_at:%Y-%m-%d %H:%M} ET (only on that date)"))
 
     if not (settings.has_openai() and settings.has_anthropic()):
         say("  Missing an API key. The council cannot run.")
@@ -386,6 +395,9 @@ def main() -> int:
                     help="hard ceiling on entries this session")
     ap.add_argument("--scan-now", action="store_true",
                     help="run one scan immediately and exit")
+    ap.add_argument("--no-flatten", action="store_true",
+                    help="never force-close at the competition flatten time; "
+                         "positions carry overnight under the normal exit rules")
     try:
         return asyncio.run(run(ap.parse_args()))
     except KeyboardInterrupt:

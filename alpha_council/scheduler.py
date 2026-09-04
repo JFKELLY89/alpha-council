@@ -52,7 +52,7 @@ from alpha_council.utils.ids import candidate_id as make_candidate_id
 from alpha_council.utils.ids import scan_id as make_scan_id
 from alpha_council.utils.time import (
     ET,
-    COMPETITION_LAST_SESSION,
+    competition_flatten_at,
     et_now,
     is_trading_day,
     parse_et_time,
@@ -516,8 +516,14 @@ class TradingSession:
                        {"trades_opened": self.summary.trades_opened})
 
     async def competition_flatten(self) -> None:
-        """Realized P&L in the submission beats open marks."""
-        if to_et(utc_now()).date() != COMPETITION_LAST_SESSION:
+        """Realized P&L in the submission beats open marks.
+
+        Fires only on the configured flatten date. A run started after
+        the competition, or with --no-flatten, carries positions
+        overnight under the normal exit rules.
+        """
+        flatten_at = competition_flatten_at(self.risk_config)
+        if flatten_at is None or to_et(utc_now()).date() != flatten_at.date():
             return
         outcomes = await self.monitor.flatten_all(
             ExitReason.COMPETITION_FLATTEN)
@@ -733,7 +739,8 @@ def build_scheduler(session: TradingSession,
         "shadow_marks")
 
     add(session.enforce_cutoff, cron(config.new_trade_cutoff), "cutoff")
-    add(session.competition_flatten, cron(config.flatten_time), "flatten")
+    if competition_flatten_at(getattr(session, "risk_config", None)) is not None:
+        add(session.competition_flatten, cron(config.flatten_time), "flatten")
     add(session.post_close, cron(config.lessons_time), "post_close")
 
     return scheduler

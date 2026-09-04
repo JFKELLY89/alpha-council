@@ -215,6 +215,33 @@ def test_before_flatten_normal_rules_apply():
                          now=before).should_exit
 
 
+def test_flatten_is_inert_after_the_competition():
+    # The anchor is 2026-09-03 15:45 ET. A bare ">=" would stay true on
+    # every later day and close each new position within one poll.
+    later = datetime(2026, 9, 4, 11, 0, tzinfo=ET)
+    decision = _evaluate(_position(opened_at=later - timedelta(hours=1)),
+                         underlying=204.0, now=later)
+    assert not decision.should_exit
+    assert "COMPETITION_FLATTEN" in decision.triggers_evaluated
+
+
+def test_flatten_disabled_by_config():
+    cfg = {**RISK_CFG, "hard": {"competition_flatten_at": None}}
+    after = datetime(2026, 9, 3, 15, 46, tzinfo=ET)
+    assert not evaluate_exit(_position(), 204.0, after, cfg).should_exit
+
+
+def test_flatten_anchor_comes_from_config():
+    cfg = {**RISK_CFG,
+           "hard": {"competition_flatten_at": "2026-09-10T15:45:00-04:00"}}
+    position = _position(expiration=date(2026, 10, 16))
+    on_the_day = datetime(2026, 9, 10, 15, 46, tzinfo=ET)
+    assert (evaluate_exit(position, 204.0, on_the_day, cfg).reason
+            is ExitReason.COMPETITION_FLATTEN)
+    old_anchor = datetime(2026, 9, 3, 15, 46, tzinfo=ET)
+    assert not evaluate_exit(position, 204.0, old_anchor, cfg).should_exit
+
+
 # ======================================================================
 # PM invalidation
 # ======================================================================

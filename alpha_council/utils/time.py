@@ -230,6 +230,39 @@ def is_competition_flatten_time(dt: datetime | None = None) -> bool:
     return to_et(dt or utc_now()) >= COMPETITION_FLATTEN_ET
 
 
+def competition_flatten_at(risk_cfg: dict | None = None) -> datetime | None:
+    """The instant every position is force-closed, or None when disabled.
+
+    Read from ``hard.competition_flatten_at`` in the Risk Constitution:
+    an ISO-8601 instant enables the flatten, an explicit null/false
+    disables it, and an absent key keeps the spec's built-in anchor.
+    """
+    hard = (risk_cfg or {}).get("hard") or {}
+    if "competition_flatten_at" not in hard:
+        return COMPETITION_FLATTEN_ET
+    raw = hard.get("competition_flatten_at")
+    if not raw:
+        return None
+    moment = (raw if isinstance(raw, datetime)
+              else datetime.fromisoformat(str(raw)))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=ET)
+    return to_et(moment)
+
+
+def is_flatten_due(now: datetime, flatten_at: datetime | None) -> bool:
+    """True only on the flatten date, at or after the flatten instant.
+
+    A bare ``now >= anchor`` stays true forever once the anchor has
+    passed, which would close every position opened on a later day
+    within one monitor poll.
+    """
+    if flatten_at is None:
+        return False
+    moment = to_et(now)
+    return moment.date() == flatten_at.date() and moment >= flatten_at
+
+
 def sessions_remaining(dt: datetime | None = None) -> int:
     today = to_et(dt or utc_now()).date()
     if today > COMPETITION_LAST_SESSION:
