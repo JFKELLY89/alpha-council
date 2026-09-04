@@ -31,8 +31,17 @@ def render(database_path: str | Path) -> None:
             hover_data=["tier", "distinct_symbols", "last_seen"],
             labels={"gate_id": "Gate", "rejections": "Rejections"},
         )
-        figure.update_layout(margin=dict(l=10, r=10, t=25, b=10))
-        theme.plot(figure)
+        # Gate ids are long snake_case tokens (INTEL_CONTRADICTS_DIRECTION);
+        # flat, they overlap and clip at the bottom edge. Angle them, give
+        # the bottom margin real room, and lift the legend off the plot.
+        figure.update_xaxes(tickangle=-38, automargin=True,
+                            tickfont=dict(size=11))
+        figure.update_layout(
+            margin=dict(l=10, r=10, t=60, b=130),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0),
+        )
+        theme.plot(figure, height=520)
 
     st.markdown("#### GateValue")
     st.caption("GateValue = −1 × mean hypothetical P&L per spread of blocked trades. Positive means the gate earned its place.")

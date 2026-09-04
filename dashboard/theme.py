@@ -291,13 +291,16 @@ def inject_css(palette: Palette) -> None:
             letter-spacing: .08em;
             color: {p.gold if p.name == 'light' else p.gold_bright} !important;
         }}
+        /* No rule under section headings: it ran the full width right
+           above the metric and effect card rows and read as a line
+           joining the boxes. Spacing alone separates the sections. */
         h4 {{
             letter-spacing: .10em;
             text-transform: uppercase;
             font-size: .82rem;
             color: {p.muted};
-            border-bottom: 1px solid {p.border};
             padding-bottom: .3rem;
+            margin-bottom: .4rem;
         }}
         .ac-kicker {{
             font-family: {DISPLAY_FONT};
