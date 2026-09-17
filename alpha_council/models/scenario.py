@@ -17,10 +17,11 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from alpha_council.models.base import StrictModel
 from alpha_council.models.enums import Direction
+from alpha_council.utils.time import utc_now
 
 
 class ScenarioType(StrEnum):
@@ -91,6 +92,16 @@ class ScenarioSet(StrictModel):
     spot_at_generation: float = Field(gt=0)
     generated_at: datetime
     overall_uncertainty: Likelihood
+
+    @field_validator("generated_at", mode="before")
+    @classmethod
+    def _server_stamps_the_clock(cls, _value: object) -> datetime:
+        """LLM-filled schema, but the model cannot know the wall clock —
+        it echoes a prompt date or invents one (a sibling field killed a
+        whole LessonSet live on 09-17 with the string 'not provided in
+        brief'). Strict structured output forces the field to be emitted;
+        the server discards it and stamps the real time."""
+        return utc_now()
     scenarios: list[Scenario] = Field(min_length=2, max_length=4)
 
     @model_validator(mode="after")

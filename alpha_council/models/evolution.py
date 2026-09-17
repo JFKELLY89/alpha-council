@@ -19,9 +19,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from alpha_council.models.base import StrictModel
+from alpha_council.utils.time import utc_now
 
 
 # ======================================================================
@@ -34,6 +35,16 @@ class PreMarketBrief(StrictModel):
     session_date: str
     generated_at: datetime
     regime_summary: str = Field(min_length=20)
+
+    @field_validator("generated_at", mode="before")
+    @classmethod
+    def _server_stamps_the_clock(cls, _value: object) -> datetime:
+        """LLM-filled schema, but the model cannot know the wall clock —
+        it echoes a prompt date or invents one (a sibling field killed a
+        whole LessonSet live on 09-17 with the string 'not provided in
+        brief'). Strict structured output forces the field to be emitted;
+        the server discards it and stamps the real time."""
+        return utc_now()
     session_bias: Literal["RISK_ON", "RISK_OFF", "MIXED", "NEUTRAL"]
     important_themes: list[str] = Field(default_factory=list, max_length=8)
     candidate_themes: list[str] = Field(default_factory=list, max_length=8)

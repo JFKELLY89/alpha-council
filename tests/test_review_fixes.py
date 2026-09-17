@@ -424,3 +424,76 @@ def test_anthropic_safe_schema_strips_range_constraints():
                                       "strongest_counterargument": "x",
                                       "information_to_reverse_verdict": [],
                                       "summary": "s"})
+
+
+# ======================================================================
+# 10. Server-stamped generated_at (found live 09-17: the lessons model
+#     emitted the string 'not provided in brief' for generated_at and
+#     the whole LessonSet was voided; PreMarketBrief and ScenarioSet
+#     carried the same landmine)
+# ======================================================================
+
+def _minimal_lesson_set(generated_at):
+    from alpha_council.models.lessons import LessonSet
+
+    return LessonSet.model_validate({
+        "generated_at": generated_at,
+        "period_start": "2026-09-10T20:15:00+00:00",
+        "period_end": "2026-09-17T20:15:00+00:00",
+        "closed_trades": 4,
+        "decisions_reviewed": 29,
+        "overall_assessment": "Sample is too small for conclusions.",
+        "lessons": [],
+        "insufficient_evidence": True,
+    })
+
+
+def test_lesson_set_survives_garbage_generated_at():
+    # The exact string from the 09-17 live failure.
+    parsed = _minimal_lesson_set("not provided in brief")
+    assert parsed.generated_at.tzinfo is not None
+
+
+def test_generated_at_is_server_time_not_model_echo():
+    from datetime import datetime, timezone
+
+    parsed = _minimal_lesson_set("2001-01-01T00:00:00+00:00")
+    # A valid-but-echoed timestamp is discarded too: the server owns
+    # this clock, so the value must be now, not the model's echo.
+    assert parsed.generated_at.year >= 2026
+    assert (datetime.now(timezone.utc) - parsed.generated_at
+            ).total_seconds() < 60
+
+
+def test_scenario_and_brief_generated_at_are_stamped():
+    from alpha_council.models.evolution import PreMarketBrief
+    from alpha_council.models.scenario import ScenarioSet
+
+    brief = PreMarketBrief.model_validate({
+        "session_date": "2026-09-17",
+        "generated_at": "yesterday, probably",
+        "regime_summary": "Mixed tape with defensive rotation intraday.",
+        "session_bias": "MIXED",
+        "confidence": 0.5,
+    })
+    assert brief.generated_at.tzinfo is not None
+
+    scenarios = ScenarioSet.model_validate({
+        "scenario_set_id": "ss_x", "decision_id": "dec_x", "symbol": "SPY",
+        "spot_at_generation": 760.0,
+        "generated_at": "not provided in brief",
+        "overall_uncertainty": "POSSIBLE",
+        "scenarios": [
+            {"scenario_type": "CONTINUATION",
+             "narrative": "Trend continuation on participation.",
+             "likelihood": "LIKELY", "horizon_days": 7,
+             "underlying_low": 762.0, "underlying_mid": 766.0,
+             "underlying_high": 772.0},
+            {"scenario_type": "REVERSAL",
+             "narrative": "Failed breakout mean-reverts.",
+             "likelihood": "POSSIBLE", "horizon_days": 7,
+             "underlying_low": 744.0, "underlying_mid": 750.0,
+             "underlying_high": 756.0},
+        ],
+    })
+    assert scenarios.generated_at.tzinfo is not None

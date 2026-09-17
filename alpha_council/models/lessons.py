@@ -19,9 +19,10 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from alpha_council.models.base import StrictModel
+from alpha_council.utils.time import utc_now
 
 # Below this, a pattern is an anecdote. The threshold is deliberately low
 # for a five-day competition and would be far higher in production.
@@ -122,6 +123,16 @@ class LessonSet(StrictModel):
     generated_at: datetime
     period_start: datetime
     period_end: datetime
+
+    @field_validator("generated_at", mode="before")
+    @classmethod
+    def _server_stamps_the_clock(cls, _value: object) -> datetime:
+        """The model cannot know the wall clock; whatever it emits here is
+        an echo or a guess (live 09-17: the literal string 'not provided
+        in brief', which voided the whole set). Structured-output strict
+        mode forces the field to be emitted, so it stays in the schema —
+        and the server discards it and stamps the real time."""
+        return utc_now()
     closed_trades: int = Field(ge=0)
     decisions_reviewed: int = Field(ge=0)
     overall_assessment: str = Field(min_length=20)
