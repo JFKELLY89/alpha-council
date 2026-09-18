@@ -497,3 +497,139 @@ def test_scenario_and_brief_generated_at_are_stamped():
         ],
     })
     assert scenarios.generated_at.tzinfo is not None
+
+
+# ======================================================================
+# 11. After-hours exit loop (live 09-17 overnight: VWAP invalidation at
+#     16:36 ET started a close walk into a closed options market; one
+#     rung survived as a resting straggler and every 2-minute retry
+#     403'd against its leg hold - 131 times)
+# ======================================================================
+
+from datetime import date as _date
+from datetime import timedelta as _td
+
+from alpha_council.execution.order_manager import ExecutionOutcome
+from alpha_council.execution.position_monitor import (
+    ExitDecision as _ExitDecision,
+)
+from alpha_council.execution.position_monitor import (
+    MonitoredPosition,
+    PositionMonitor,
+)
+from alpha_council.models.enums import ExitReason
+from alpha_council.utils.time import ET as _ET
+
+
+class _FakeDB:
+    def __init__(self):
+        self.events = []
+
+    async def log_event(self, level, source, event_type, message,
+                        context=None, decision_id=None):
+        self.events.append(event_type)
+
+    async def execute(self, *a, **k):
+        return None
+
+
+class _FakeSnap:
+    quote_age = 3.0
+
+    def signal_price(self, _pct):
+        return 204.0
+
+
+class _FakeMarket:
+    async def snapshots(self, symbols):
+        return {s: _FakeSnap() for s in symbols}
+
+    async def load_bars(self, *a, **k):
+        raise RuntimeError("no bars in this test")
+
+
+class _FakeOrders:
+    def __init__(self, swept_credit=None):
+        self.swept_credit = swept_credit
+        self.sweeps = 0
+        self.walks = 0
+
+    async def sweep_working_closes(self, decision_id):
+        self.sweeps += 1
+        return self.swept_credit
+
+    async def execute_with_walk(self, structure, decision_id, qty, **kw):
+        self.walks += 1
+        return ExecutionOutcome(decision_id=decision_id, filled=False,
+                                qty=qty, final_status="NO_FILL")
+
+    async def record_calibration(self, *a, **k):
+        return None
+
+
+class _FakeJournal:
+    def __init__(self):
+        self.closes = []
+
+    async def close_trade(self, decision_id, exit_credit, reason, closed_at):
+        self.closes.append((decision_id, exit_credit, reason))
+
+
+def _monitor_with_time_stop(swept_credit=None):
+    # The module _structure() expires 2026-09-18: dte 1 from the test's
+    # 09-17 "now", inside time_stop_dte 2, so TIME_STOP fires on poll.
+    structure = _structure()
+
+    db, market = _FakeDB(), _FakeMarket()
+    orders, journal = _FakeOrders(swept_credit), _FakeJournal()
+    risk_cfg = {"exits": {
+        "primary": {"underlying_target_at_short_strike": True,
+                    "honor_pm_invalidation_rules": True,
+                    "time_stop_dte": 2},
+        "secondary": {"profit_target_pct_of_max": 0.55,
+                      "premium_stop_pct_of_entry": 0.45,
+                      "require_data_confidence": ["HIGH", "MEDIUM"]},
+        "never_require_llm_to_exit": True}}
+    monitor = PositionMonitor(db=db, market=market, orders=orders,
+                              journal=journal, config={},
+                              risk_config=risk_cfg)
+    monitor.track(MonitoredPosition(
+        decision_id="d1", symbol="NVDA", structure=structure, qty=1,
+        entry_debit=5.20,
+        opened_at=datetime(2026, 9, 15, 10, 0, tzinfo=_ET)))
+    return monitor, db, orders, journal
+
+
+@pytest.mark.asyncio
+async def test_exit_waits_for_options_rth():
+    monitor, db, orders, _ = _monitor_with_time_stop()
+    night = datetime(2026, 9, 17, 21, 50, tzinfo=_ET)
+
+    for _ in range(3):                       # three overnight polls
+        await monitor.poll(now=night, execute=True)
+
+    assert orders.walks == 0 and orders.sweeps == 0
+    # Logged once, not once per 2-minute cycle.
+    assert db.events.count("EXIT_AWAITING_OPEN") == 1
+    assert "d1" in {p.decision_id for p in monitor.tracked}
+
+    # At the open the same signal executes (sweep first, then the walk).
+    await monitor.poll(now=datetime(2026, 9, 18, 10, 30, tzinfo=_ET),
+                       execute=True)
+    assert orders.sweeps == 1 and orders.walks == 1
+
+
+@pytest.mark.asyncio
+async def test_swept_straggler_fill_becomes_the_exit():
+    monitor, db, orders, journal = _monitor_with_time_stop(
+        swept_credit=1.17)
+    outcome = await monitor.close(
+        monitor.tracked[0],
+        _ExitDecision(True, ExitReason.TIME_STOP, "test"),
+        now=datetime(2026, 9, 18, 9, 31, tzinfo=_ET))
+
+    assert orders.sweeps == 1
+    assert orders.walks == 0                 # no new order on top of a fill
+    assert outcome.filled and outcome.fill_debit == 1.17
+    assert journal.closes == [("d1", 1.17, ExitReason.TIME_STOP)]
+    assert monitor.tracked == []             # untracked once closed

@@ -578,6 +578,49 @@ class OrderManager:
                                      {"status": "open", "limit": 100})
         return orders if isinstance(orders, list) else []
 
+    async def sweep_working_closes(self, decision_id: str) -> float | None:
+        """Cancel any working CLOSE order for this decision before a new
+        close walk starts; return the net credit if one turns out FILLED.
+
+        The walk guarantees two live orders for one decision cannot
+        coexist WITHIN a walk. This guarantees it ACROSS walks: live
+        09-17 a walk died between submitting a rung and canceling it,
+        the rung sat working at the broker holding the long leg, and
+        every retry 403'd (insufficient qty, 131 times) because nothing
+        ever swept the straggler. Filled stragglers are returned, not
+        discarded — the race where the resting order fills at the open
+        just before the sweep is a completed exit, and resubmitting on
+        top of it would reopen the book the other way.
+        """
+        rows = await self.db.fetchall(
+            "SELECT DISTINCT alpaca_order_id, client_order_id FROM orders "
+            "WHERE decision_id = ? AND intent = 'CLOSE' AND status NOT IN "
+            "('filled','canceled','expired','rejected','done_for_day')",
+            (decision_id,))
+        fill_credit: float | None = None
+        for row in rows:
+            oid = row["alpaca_order_id"]
+            if not oid:
+                continue
+            await self.cancel(oid)
+            confirmed = await self._confirm_after_cancel(oid)
+            status = (confirmed or {}).get("status", "unknown")
+            if status != "unknown":
+                await self._update_status(row["client_order_id"], status)
+            if status == "filled" and confirmed is not None:
+                fill_credit = _extract_fill_debit(confirmed, 0.0,
+                                                  closing=True)
+                await self.db.log_event(
+                    "WARN", "order_manager", "STALE_CLOSE_FILLED",
+                    f"straggler close {oid} filled at {fill_credit}; "
+                    "using it as the exit", {"decision_id": decision_id})
+            else:
+                await self.db.log_event(
+                    "INFO", "order_manager", "STALE_CLOSE_SWEPT",
+                    f"canceled straggler close {oid} ({status})",
+                    {"decision_id": decision_id})
+        return fill_credit
+
 
 def _extract_fill_debit(order: dict[str, Any], fallback: float,
                         closing: bool = False) -> float:

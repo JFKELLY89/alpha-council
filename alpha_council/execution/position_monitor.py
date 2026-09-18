@@ -41,6 +41,7 @@ from alpha_council.models.trading import InvalidationRule, OptionStructure
 from alpha_council.utils.time import (
     competition_flatten_at,
     is_flatten_due,
+    is_rth,
     iso_utc,
     to_et,
     utc_now,
@@ -289,6 +290,9 @@ class PositionMonitor:
         self.marks = marks
         self.shadows = shadows
         self._positions: dict[str, MonitoredPosition] = {}
+        # Decisions whose exit is waiting for the options market to open,
+        # so the wait is logged once instead of every 2-minute poll.
+        self._exit_awaiting_rth: set[str] = set()
 
     def track(self, position: MonitoredPosition) -> None:
         self._positions[position.decision_id] = position
@@ -423,6 +427,26 @@ class PositionMonitor:
                                         equity_confidence=confidence)
 
             if decision.should_exit and execute:
+                # Options trade 09:30-16:00 ET only. An exit signal on the
+                # underlying can arrive outside that window (live 09-17:
+                # VWAP invalidation at 16:36 ET), and submitting closes
+                # into a closed options market left a resting straggler
+                # plus 131 x 403 retries overnight. Keep evaluating; act
+                # the moment a fill is possible. If the condition heals
+                # before the open, not exiting is the rule working.
+                if not is_rth(now):
+                    if position.decision_id not in self._exit_awaiting_rth:
+                        self._exit_awaiting_rth.add(position.decision_id)
+                        await self.db.log_event(
+                            "INFO", "position_monitor",
+                            "EXIT_AWAITING_OPEN",
+                            f"{position.symbol}: {decision.reason} fired "
+                            "outside options RTH; will act at the open if "
+                            "it still holds",
+                            {"reason": str(decision.reason)},
+                            decision_id=position.decision_id)
+                    continue
+                self._exit_awaiting_rth.discard(position.decision_id)
                 await self.close(position, decision, now)
         return decisions
 
@@ -494,6 +518,30 @@ class PositionMonitor:
             f"{position.symbol}: {decision.reason} - {decision.detail}",
             {"reason": str(decision.reason), "advisory": decision.advisory},
             decision_id=position.decision_id)
+
+        # A straggler close order from a previous walk holds the legs and
+        # 403s every new submission (live 09-17). Sweep before walking;
+        # a straggler that FILLED is this exit, already done.
+        swept_credit = await self.orders.sweep_working_closes(
+            position.decision_id)
+        if swept_credit is not None:
+            await self.journal.close_trade(
+                position.decision_id, exit_credit=swept_credit,
+                reason=decision.reason or ExitReason.MANUAL, closed_at=now)
+            self.untrack(position.decision_id)
+            if self.shadows is not None:
+                try:
+                    await self.shadows.close_decision(
+                        position.decision_id, swept_credit, now)
+                except Exception as exc:  # noqa: BLE001
+                    await self.db.log_event(
+                        "ERROR", "position_monitor", "SHADOW_CLOSE_FAILED",
+                        f"{position.decision_id}: {exc}"[:300],
+                        decision_id=position.decision_id)
+            return ExecutionOutcome(
+                decision_id=position.decision_id, filled=True,
+                qty=position.qty, fill_debit=swept_credit, filled_at=now,
+                final_status="filled")
 
         close_mid: float | None = None
         close_conservative: float | None = None
