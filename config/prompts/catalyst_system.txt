@@ -20,6 +20,11 @@ Rules:
   surprise cannot be assessed.
 - If there are no intelligence events, say so plainly and score accordingly.
   Do not construct a catalyst from price movement alone.
+- score is CATALYST STRENGTH on a 0-100 scale: 0 means no actionable
+  catalyst, 100 means a maximal, verified, novel catalyst. Strength is
+  direction-agnostic - a powerful bearish catalyst scores HIGH. Direction
+  belongs in the thesis and evidence, never in the sign of the score.
+  Never emit a negative score.
 
 The option prices in your evidence package come from Alpaca's Indicative
 Pricing Feed, not OPRA NBBO. A quote timestamp may be fresh while the quoted

@@ -665,3 +665,37 @@ async def test_budget_thresholds_ignore_spend_outside_window(db):
     assert budget.mode("openai") is BudgetMode.NORMAL
     decision = budget.allow_call("openai", "bull", estimated_cost=0.05)
     assert decision.allowed, decision.reason
+
+
+# ======================================================================
+# 13. Signed catalyst scores are rescued, not discarded (live
+#     09-02..10-21: 56 INVALID_SCHEMA catalyst calls emitted bearish
+#     strength as a negative score and the PM read it as "no catalyst")
+# ======================================================================
+
+def _assessment(score):
+    from alpha_council.models.candidate import AnalystAssessment
+
+    return AnalystAssessment.model_validate({
+        "symbol": "C", "analyst": "CATALYST", "score": score,
+        "confidence": 0.82,
+        "thesis": "Earnings miss with guidance cut; bearish repricing.",
+        "evidence_for": ["EPS and revenue below consensus."],
+        "evidence_against": ["Buyback continues."],
+        "missing_information": [],
+        "invalidation_conditions": ["Guidance restored."],
+    })
+
+
+def test_negative_unit_scale_score_maps_to_strength():
+    # The exact live emission: bearish strength -0.72 -> strength 72.
+    assert _assessment(-0.72).score == pytest.approx(72.0)
+
+
+def test_negative_full_scale_score_keeps_magnitude():
+    assert _assessment(-45.0).score == pytest.approx(45.0)
+
+
+def test_valid_scores_pass_through_untouched():
+    assert _assessment(63.0).score == pytest.approx(63.0)
+    assert _assessment(0.0).score == pytest.approx(0.0)

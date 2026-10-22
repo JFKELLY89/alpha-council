@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from alpha_council.models.base import StrictModel
 from alpha_council.models.enums import CandidateTrack, DiscoverySource, Direction
@@ -145,6 +145,25 @@ class AnalystAssessment(StrictModel):
     analyst: Literal["BULL", "BEAR", "CATALYST"]
     score: float = SCORE
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _signed_strength_recovers(cls, v: object) -> object:
+        """Rescue direction-signed scores instead of discarding the call.
+
+        OpenAI strict mode ignores numeric range keywords, and the
+        catalyst analyst sometimes expressed "bearish, strength 0.72"
+        as score=-0.72 — client-side validation then threw away 56 of
+        the most decisive catalyst assessments (measured 09-02..10-21),
+        and the PM read the silence as "no verified catalyst". Score is
+        direction-agnostic strength; direction lives in the thesis. A
+        negative emission is a clear statement of magnitude, so keep
+        the magnitude: unit-scale values also map onto 0-100.
+        """
+        if isinstance(v, (int, float)) and v < 0:
+            mag = abs(float(v))
+            return min(100.0, mag * 100.0 if mag <= 1.0 else mag)
+        return v
     thesis: str
     evidence_for: list[str]
     evidence_against: list[str]
