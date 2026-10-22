@@ -15,7 +15,7 @@ Place at: alpha_council/agents/budget.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -120,6 +120,15 @@ class BudgetManager:
             "anthropic": (float(b.get("anthropic_reserve_at_usd", 40.0)),
                           float(b.get("anthropic_block_at_usd", 48.0))),
         }
+        # Threshold window. The competition-era manager compared the
+        # reserve/block thresholds against ALL-TIME spend, which is a
+        # one-way ratchet: by 2026-10-09 lifetime openai spend crossed
+        # the reserve line and every analyst, lessons, evolution, and
+        # briefing call was refused for twelve days straight — councils
+        # died at the analyst stage and the learning loop went dark.
+        # Thresholds now bound a rolling window; the daily ceiling is
+        # unchanged and still the tight guard.
+        self.window_days = int(b.get("rolling_window_days", 30))
         self._session_spend: dict[str, float] = {}
         self._totals: dict[str, float] = {}
         self._daily: dict[str, float] = {}
@@ -129,9 +138,12 @@ class BudgetManager:
 
     async def load(self) -> dict[str, float]:
         """Read committed spend from api_usage. Survives a restart."""
+        window_start = (to_et(utc_now())
+                        - timedelta(days=self.window_days)).date()
         rows = await self.db.fetchall(
             "SELECT provider, SUM(cost_usd) AS total FROM api_usage "
-            "GROUP BY provider")
+            "WHERE substr(occurred_at,1,10) >= ? GROUP BY provider",
+            (str(window_start),))
         self._totals = {r["provider"]: float(r["total"] or 0.0) for r in rows}
 
         today = str(to_et(utc_now()).date())

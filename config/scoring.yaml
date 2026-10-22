@@ -390,6 +390,11 @@ budget:
                                  # loop guard still binds well under the
                                  # daily provider ceiling
   daily_provider_ceiling_usd: 8.00
+  # Reserve/block thresholds bound this rolling window, not all-time
+  # spend. Lifetime accounting locked the desk out of its own analysts
+  # and learning loop on 2026-10-09 when cumulative spend crossed the
+  # reserve line; the daily ceiling above is the ongoing guard.
+  rolling_window_days: 30
   openai_total_usd: 50.00
   anthropic_total_usd: 50.00
   openai_reserve_at_usd: 44.00

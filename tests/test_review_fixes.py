@@ -633,3 +633,35 @@ async def test_swept_straggler_fill_becomes_the_exit():
     assert outcome.filled and outcome.fill_debit == 1.17
     assert journal.closes == [("d1", 1.17, ExitReason.TIME_STOP)]
     assert monitor.tracked == []             # untracked once closed
+
+
+# ======================================================================
+# 12. Budget thresholds bound a rolling window, not all-time spend
+#     (live 10-09..10-21: lifetime spend crossed the reserve line and
+#     analysts/lessons/evolution/briefing were refused for 12 days)
+# ======================================================================
+
+@pytest.mark.asyncio
+async def test_budget_thresholds_ignore_spend_outside_window(db):
+    from alpha_council.agents.budget import BudgetManager, BudgetMode
+    from alpha_council.utils.ids import new_uuid
+    from alpha_council.utils.time import iso_utc, utc_now
+
+    old = iso_utc(utc_now() - timedelta(days=40))
+    recent = iso_utc(utc_now())
+    for occurred, cost in ((old, 43.0), (recent, 5.0)):
+        await db.execute(
+            "INSERT INTO api_usage(usage_id, provider, model, endpoint, "
+            "occurred_at, input_tokens, output_tokens, cached_tokens, "
+            "cost_usd) VALUES(?,?,?,?,?,?,?,?,?)",
+            (new_uuid(), "openai", "gpt-5.6-sol", "bull", occurred,
+             1000, 500, 0, cost))
+
+    budget = BudgetManager(db, {"budget": {"rolling_window_days": 30}})
+    await budget.load()
+
+    # All-time spend is $48 (would be RESERVE/BLOCKED); the window sees $5.
+    assert budget.total_spent("openai") == pytest.approx(5.0)
+    assert budget.mode("openai") is BudgetMode.NORMAL
+    decision = budget.allow_call("openai", "bull", estimated_cost=0.05)
+    assert decision.allowed, decision.reason

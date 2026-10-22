@@ -74,7 +74,11 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.execute("PRAGMA journal_mode = WAL")
         await self._conn.execute("PRAGMA synchronous = NORMAL")
-        await self._conn.execute("PRAGMA busy_timeout = 5000")
+        # 15s, was 5s: on 2026-10-08 a dashboard reader plus a heavy scan
+        # produced ~1,500 "database is locked" job failures in two days.
+        # WAL writers queue behind one another; waiting out a long reader
+        # is strictly better than a dead shadow-marks or scan job.
+        await self._conn.execute("PRAGMA busy_timeout = 15000")
 
     async def close(self) -> None:
         if self._conn is not None:
