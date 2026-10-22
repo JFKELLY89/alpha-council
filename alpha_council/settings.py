@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     alpaca_paper_trade: bool = True
     alpaca_data_feed: str = "iex"
     alpaca_option_feed: str = "indicative"
+    # Last 4 of the EXPECTED broker account number. Guards against the
+    # mis-keyed-credentials class of accident: a vault holding near-
+    # identical keys for a different account would otherwise trade the
+    # wrong book with every safety light green. Empty = guard inert.
+    alpaca_expected_account_last4: str = ""
 
     # ---- ai providers ----
     openai_api_key: SecretStr = SecretStr("")

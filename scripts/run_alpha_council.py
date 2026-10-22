@@ -138,8 +138,12 @@ async def run(args: argparse.Namespace) -> int:
         await ensure_config_version(db, config_version, scoring, risk_cfg,
                                     tier=1, note="autonomous session")
 
+        identity = await api.assert_account_identity(
+            settings.alpaca_expected_account_last4)
+
         # ---- data plane ---------------------------------------------
         rule("1. SERVICES")
+        print(f"  account identity : {identity}")
         market = MarketDataService(api, db)
         catalog = AssetCatalog(api)
         screeners = ScreenerService(api, db)

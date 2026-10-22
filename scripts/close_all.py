@@ -128,6 +128,8 @@ async def run(args: argparse.Namespace) -> int:
 
     async with Database(settings.database_path) as db, \
             AlpacaRestClient(settings, scoring) as api:
+        await api.assert_account_identity(
+            settings.alpaca_expected_account_last4)
         market = MarketDataService(api, db)
         orders = OrderManager(api, db)
         journal = TradeJournal(db)

@@ -699,3 +699,41 @@ def test_negative_full_scale_score_keeps_magnitude():
 def test_valid_scores_pass_through_untouched():
     assert _assessment(63.0).score == pytest.approx(63.0)
     assert _assessment(0.0).score == pytest.approx(0.0)
+
+
+# ======================================================================
+# 14. Broker-identity guard (imported from the hackathon winner's
+#     design: gates key on the broker-REPORTED account number)
+# ======================================================================
+
+class _FakeIdentityApi:
+    def __init__(self, account=None, exc=None):
+        self._account, self._exc = account, exc
+
+    async def get_account(self):
+        if self._exc:
+            raise self._exc
+        return self._account
+
+    from alpha_council.alpaca.rest_client import AlpacaRestClient
+    assert_account_identity = AlpacaRestClient.assert_account_identity
+
+
+@pytest.mark.asyncio
+async def test_identity_mismatch_refuses_to_run():
+    api = _FakeIdentityApi(account={"account_number": "PA3ABC9999"})
+    with pytest.raises(RuntimeError, match="refusing to run"):
+        await api.assert_account_identity("1234")
+
+
+@pytest.mark.asyncio
+async def test_identity_match_and_inert_paths():
+    api = _FakeIdentityApi(account={"account_number": "PA3ABC1234"})
+    assert await api.assert_account_identity("1234") == "verified"
+    assert await api.assert_account_identity("") == "unconfigured"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_identity_warns_and_proceeds():
+    api = _FakeIdentityApi(exc=RuntimeError("transport down"))
+    assert await api.assert_account_identity("1234") == "unreadable"

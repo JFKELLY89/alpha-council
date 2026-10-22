@@ -316,6 +316,41 @@ class AlpacaRestClient:
     async def get_account(self) -> dict[str, Any]:
         return await self._get(f"{self.trade_base}/v2/account")
 
+    async def assert_account_identity(self, expected_last4: str) -> str:
+        """Fail hard if the broker-reported account is not the expected one.
+
+        The key pair decides which account this process trades; nothing
+        else in the config would notice a vault mix-up with another
+        project's near-identical keys (idea borrowed from the hackathon
+        winner's identity guard, which keyed every gate on the
+        broker-REPORTED account number, never the operator's intent).
+
+        Asymmetric by design: a definite mismatch refuses to run; an
+        UNREADABLE identity (transport error, missing field) warns and
+        proceeds, because benching the desk on a transient read failure
+        protects nothing — the paper-only lock still stands regardless.
+        Empty expected_last4 leaves the guard inert.
+        """
+        if not expected_last4:
+            return "unconfigured"
+        try:
+            account = await self.get_account()
+            number = str(account.get("account_number") or "")
+        except Exception as exc:  # noqa: BLE001 - warn-and-proceed path
+            print(f"[identity] account identity unreadable ({exc}); "
+                  "proceeding on the paper-only lock", flush=True)
+            return "unreadable"
+        if not number:
+            print("[identity] broker returned no account_number; "
+                  "proceeding on the paper-only lock", flush=True)
+            return "unreadable"
+        if number[-4:] != expected_last4:
+            raise RuntimeError(
+                f"broker reports account ...{number[-4:]} but this desk "
+                f"expects ...{expected_last4}. Wrong credentials — "
+                "refusing to run.")
+        return "verified"
+
     async def get_calendar(self, start: str, end: str) -> list[dict[str, Any]]:
         payload = await self._get(f"{self.trade_base}/v2/calendar",
                                   {"start": start, "end": end})
