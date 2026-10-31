@@ -29,6 +29,7 @@ Place at: alpha_council/evolution/lessons.py
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -39,6 +40,95 @@ from alpha_council.db.engine import Database
 from alpha_council.models.lessons import LessonSet, StrategyLesson
 from alpha_council.utils.ids import new_uuid
 from alpha_council.utils.time import iso_utc, utc_now
+
+# ----------------------------------------------------------------------
+# uniform-config spans (hackathon review idea #3, from Autobelay)
+#
+# Intraday tier escalations create versions named <base>-t<tier>-HHMMSS-
+# xxxx (config_store.record_tier_change), so by late October the history
+# held dozens of "config versions" and Alpha Evolution twice refused to
+# analyse on "too many configurations in the sample". The confound that
+# matters is the BASE configuration: a span is a maximal run of versions
+# sharing one base, and evidence is windowed per span instead of being
+# refused wholesale.
+# ----------------------------------------------------------------------
+
+_TIER_VERSION_RE = re.compile(r"^(?P<base>.+)-t[123]-\d{6}-[0-9a-f]{4}$")
+
+
+def span_base(config_version: str | None) -> str:
+    """Collapse a tier-escalation version onto the base it derives from."""
+    if not config_version:
+        return ""
+    match = _TIER_VERSION_RE.match(config_version)
+    return match.group("base") if match else config_version
+
+
+async def config_spans(db: Database) -> list[dict[str, Any]]:
+    """Whole-history spans, oldest first, with per-span outcome counts.
+
+    Spans deliberately ignore the brief's lookback window: the current
+    span may have started long before it, and cutting a span mid-way would
+    reintroduce the very confound this exists to remove.
+    """
+    versions = await db.fetchall(
+        "SELECT config_version, activated_at FROM config_versions "
+        "ORDER BY activated_at")
+    spans: list[dict[str, Any]] = []
+    for row in versions:
+        base = span_base(row["config_version"])
+        if spans and spans[-1]["base_version"] == base:
+            spans[-1]["versions"].append(row["config_version"])
+        else:
+            spans.append({"base_version": base,
+                          "started_at": row["activated_at"],
+                          "ended_at": None,
+                          "versions": [row["config_version"]]})
+    for prev, nxt in zip(spans, spans[1:]):
+        prev["ended_at"] = nxt["started_at"]
+
+    decision_counts = await db.fetchall(
+        "SELECT config_version, COUNT(*) AS n FROM decisions "
+        "WHERE COALESCE(candidate_track,'') != 'CALIBRATION' "
+        "GROUP BY config_version")
+    trade_rows = await db.fetchall(
+        "SELECT d.config_version, COUNT(*) AS n, "
+        "ROUND(SUM(t.realized_pnl), 2) AS pnl, "
+        "SUM(CASE WHEN t.realized_pnl > 0 THEN 1 ELSE 0 END) AS wins "
+        "FROM trade_journal t "
+        "JOIN decisions d ON d.decision_id = t.decision_id "
+        "WHERE t.status = 'CLOSED' GROUP BY d.config_version")
+    decisions_by_version = {r["config_version"]: int(r["n"] or 0)
+                            for r in decision_counts}
+    trades_by_version = {r["config_version"]: r for r in trade_rows}
+
+    for span in spans:
+        decisions = closed = wins = 0
+        pnl = 0.0
+        for version in span["versions"]:
+            decisions += decisions_by_version.get(version, 0)
+            trade = trades_by_version.get(version)
+            if trade:
+                closed += int(trade["n"] or 0)
+                wins += int(trade["wins"] or 0)
+                pnl += float(trade["pnl"] or 0.0)
+        span["decisions"] = decisions
+        span["closed_trades"] = closed
+        span["wins"] = wins
+        span["pnl"] = round(pnl, 2)
+        span["version_count"] = len(span["versions"])
+    return spans
+
+
+async def current_span_versions(db: Database) -> tuple[list[str],
+                                                       dict[str, Any] | None]:
+    """Versions of the span in force now, plus its metadata (or None)."""
+    spans = await config_spans(db)
+    if not spans:
+        return [], None
+    current = spans[-1]
+    meta = {k: v for k, v in current.items() if k != "versions"}
+    return list(current["versions"]), meta
 
 
 @dataclass(slots=True)
@@ -59,6 +149,8 @@ class LessonBrief:
     analysts: dict[str, Any] = field(default_factory=dict)
     intelligence: dict[str, Any] = field(default_factory=dict)
     config_versions: list[dict[str, Any]] = field(default_factory=list)
+    config_spans: list[dict[str, Any]] = field(default_factory=list)
+    current_span: dict[str, Any] = field(default_factory=dict)
 
     @property
     def closed_trades(self) -> int:
@@ -88,6 +180,17 @@ class LessonBrief:
             "analyst_behaviour": self.analysts,
             "intelligence_coverage": self.intelligence,
             "config_versions_in_period": self.config_versions,
+            "uniform_config_spans": self.config_spans,
+            "current_span_performance": self.current_span,
+            "span_note": (
+                "A span is a maximal run of sessions under ONE base "
+                "configuration; intraday tier escalations collapse onto "
+                "their base. Trades from different spans are different "
+                "experiments: draw performance conclusions from the "
+                "current span, use earlier spans only to form hypotheses, "
+                "and treat cross-span aggregates as confounded. Config "
+                "churn is windowed for you - it is no longer a reason to "
+                "refuse analysis; a thin CURRENT span is."),
         }
 
 
@@ -188,6 +291,16 @@ async def build_brief(db: Database, lookback_days: int = 7,
     brief.config_versions = await db.fetchall(
         "SELECT config_version, tier, activated_at, note FROM config_versions "
         "WHERE activated_at >= ? ORDER BY activated_at", (since,))
+
+    spans = await config_spans(db)
+    brief.config_spans = [
+        {k: v for k, v in span.items() if k != "versions"}
+        for span in spans[-6:]]
+    if spans:
+        current = dict(brief.config_spans[-1])
+        wins, closed = current.get("wins", 0), current.get("closed_trades", 0)
+        current["win_rate"] = (round(wins / closed, 3) if closed else None)
+        brief.current_span = current
 
     return brief
 

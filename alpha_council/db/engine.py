@@ -40,6 +40,7 @@ REQUIRED_TABLES = {
     "strategy_lessons", "strategy_versions", "challenger_proposals",
     "strategy_shadow_decisions", "strategy_performance_snapshots",
     "promotion_recommendations",
+    "market_priors", "prior_scores",
     "api_usage", "system_events",
 }
 

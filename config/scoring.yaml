@@ -19,7 +19,11 @@
 # Freshness and fidelity are separate problems and are handled separately.
 # ======================================================================
 
-config_version: v2.5-measured-2
+# v2.6 (2026-10-30): hackathon-review ideas #2/#3/#5 land together - PM
+# outcome feedback + rejection cooldown, evolution config-span windowing,
+# ETF cohort with Brier-scored chain priors. New base version so the new
+# behavior starts its own uniform-config span.
+config_version: v2.6-hackathon-1
 
 # ----------------------------------------------------------------------
 # discovery funnel: 250 -> 30 -> 12 -> 5 -> <=3 councils
@@ -173,6 +177,30 @@ council_seats:
   reserve_event_seat: true        # top EVENT finalist always gets a seat
   abstain_cooldown_hours: 2.0     # skip re-council after a recent abstain...
   abstain_rescore_delta: 4.0      # ...unless final score moved this much
+  # Idea #2 (2026-10-30): a same-direction thesis the Risk Constitution
+  # refused or the Red Team vetoed stays off the council for this long.
+  # Infra failures and unfilled walks are NOT refusals and stay retryable.
+  rejection_cooldown_hours: 4.0
+
+# ----------------------------------------------------------------------
+# market-implied priors (hackathon review idea #5, 2026-10-30)
+# Chain-implied expected move + risk-neutral P(up) for an ETF cohort,
+# fed to the council as evidence and Brier-scored nightly at expiry.
+# SPY/QQQ/VOO/VUG/SCHD were requested by the operator; IWM/DIA were
+# already core; GLD/TLT add metals and rates catalyst diversity with
+# top-tier chains. VOO/VUG/SCHD chains are thin - that is deliberate:
+# the usability gates measure it and the dated review decides their fate.
+# ----------------------------------------------------------------------
+priors:
+  enabled: true
+  etf_cohort: [SPY, QQQ, IWM, DIA, VOO, VUG, SCHD, GLD, TLT]
+  cohort_added: "2026-10-30"
+  cohort_review_date: "2026-11-20"   # one-shot operator review, run-once
+  horizon_days: 7                    # matches the median holding period
+  refresh_minutes: 90                # per-symbol compute gate across scans
+  strike_band_pct: 0.08              # contracts fetched within +/-8% of spot
+  max_leg_spread_pct: 0.25           # wider quotes are unreadable, not data
+  max_strike_gap_pct: 0.02           # coarser grids cannot seat a digital
 
 # Reward/risk is DERIVED, never asserted: RR = (1 - c/w) / (c/w).
 # Tier 1 max_cost_to_width 0.55 implies RR >= 0.82.

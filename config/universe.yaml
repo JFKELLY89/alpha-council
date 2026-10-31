@@ -25,6 +25,8 @@ benchmark_map:
   HEALTH: SPY
   INDUSTRIAL: SPY
   INDEX: SPY
+  COMMODITY: SPY        # GLD: relative strength vs the broad tape
+  RATES: SPY            # TLT: same
   UNKNOWN: SPY          # dynamic symbols with no sector mapping
 
 core_symbols:
@@ -33,6 +35,16 @@ core_symbols:
   - QQQ
   - IWM
   - DIA
+  # ETF cohort expansion 2026-10-30 (hackathon review idea #5, operator
+  # request). VOO/VUG/SCHD chains are known-thin: the liquidity gates
+  # measure that, and the dated cohort review (priors.cohort_review_date
+  # in scoring.yaml) decides expansion or removal from evidence. GLD and
+  # TLT add metals and rates catalyst diversity with deep chains.
+  - VOO
+  - VUG
+  - SCHD
+  - GLD
+  - TLT
 
   # semis and hardware
   - NVDA
@@ -180,7 +192,11 @@ sectors:
   ENERGY:      [XOM, CVX, COP, SLB]
   HEALTH:      [LLY, UNH, JNJ, ABBV, MRK, PFE]
   INDUSTRIAL:  [CAT, DE, GE, RTX, BA, UPS]
-  INDEX:       [SPY, QQQ, IWM, DIA]
+  # SPY/VOO track the same index and QQQ/VUG are heavily correlated:
+  # one INDEX bucket means the 4% sector cap treats them as one bet.
+  INDEX:       [SPY, QQQ, IWM, DIA, VOO, VUG, SCHD]
+  COMMODITY:   [GLD]
+  RATES:       [TLT]
 
 # Dynamic symbols with no sector mapping are assigned UNKNOWN and share a
 # single concentration bucket, so an unmapped cluster cannot evade the 4%

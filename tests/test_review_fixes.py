@@ -20,8 +20,20 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
+from alpha_council.agents.evidence import EvidenceBuilder
+from alpha_council.agents.outcomes import recent_outcomes, symbol_session_history
 from alpha_council.alpaca.market_data import SymbolSnapshot, normalize_snapshot
 from alpha_council.db.engine import Database
+from alpha_council.evolution.cohort_review import build_cohort_review
+from alpha_council.evolution.lessons import (
+    config_spans,
+    current_span_versions,
+    span_base,
+)
+from alpha_council.models.candidate import CandidateFeatures
+from alpha_council.models.enums import DiscoverySource
+from alpha_council.quant.priors import PriorsService, chain_implied
+from alpha_council.scheduler import TradingSession
 from alpha_council.execution.order_manager import (
     _extract_fill_debit,
     build_intent,
@@ -737,3 +749,387 @@ async def test_identity_match_and_inert_paths():
 async def test_unreadable_identity_warns_and_proceeds():
     api = _FakeIdentityApi(exc=RuntimeError("transport down"))
     assert await api.assert_account_identity("1234") == "unreadable"
+
+
+# ======================================================================
+# 15. Hackathon review idea #2 - outcome feedback and repeat-rejection
+#     cooldown (the PM proposed blind to its own record, and refused
+#     theses re-consumed council seats the same session)
+# ======================================================================
+
+async def _seed_closed_trade(db, decision_id: str, symbol: str, pnl: float,
+                             exit_reason: str, hours_held: float,
+                             closed_at: datetime) -> None:
+    opened = closed_at - timedelta(hours=hours_held)
+    await db.execute(
+        "INSERT INTO decisions(decision_id, config_version, symbol, state, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        (decision_id, "v-test", symbol, "CLOSED",
+         opened.isoformat(), closed_at.isoformat()))
+    await db.execute(
+        "INSERT INTO trade_journal(trade_id, decision_id, opened_at, "
+        "closed_at, status, qty, entry_debit, realized_pnl, candidate_track, "
+        "thesis, exit_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (f"tr_{decision_id}", decision_id, opened.isoformat(),
+         closed_at.isoformat(), "CLOSED", 1, 5.0, pnl, "EVENT",
+         "t", exit_reason))
+
+
+@pytest.mark.asyncio
+async def test_recent_outcomes_block_aggregates_the_journal(db):
+    await _seed_closed_trade(db, "dec_o1", "QCOM", 120.0,
+                             "UNDERLYING_TARGET", 26.0,
+                             NOW - timedelta(days=1))
+    await _seed_closed_trade(db, "dec_o2", "NOW", -80.0,
+                             "UNDERLYING_INVALIDATION", 3.0,
+                             NOW - timedelta(hours=5))
+
+    block = await recent_outcomes(db, now=NOW)
+    assert block is not None
+    assert block["aggregate"]["closed_trades"] == 2
+    assert block["aggregate"]["win_rate"] == pytest.approx(0.5)
+    assert block["aggregate"]["total_pnl"] == pytest.approx(40.0)
+    # Newest first, with the hold time the PM never used to see.
+    assert block["last_closed_trades"][0]["symbol"] == "NOW"
+    assert block["last_closed_trades"][0]["hold_hours"] == pytest.approx(3.0)
+    reasons = {r["exit_reason"] for r in block["by_exit_reason"]}
+    assert reasons == {"UNDERLYING_TARGET", "UNDERLYING_INVALIDATION"}
+
+
+@pytest.mark.asyncio
+async def test_recent_outcomes_none_on_an_empty_journal(db):
+    assert await recent_outcomes(db, now=NOW) is None
+
+
+async def _seed_config_version(db, version: str, activated_at: str,
+                               tier: int = 1) -> None:
+    await db.execute(
+        "INSERT INTO config_versions(config_version, activated_at, tier, "
+        "scoring_json, risk_json, note) VALUES(?,?,?,?,?,?)",
+        (version, activated_at, tier, "{}", "{}", "test"))
+
+
+async def _seed_rejection(db, symbol: str, stage: str, gate_id: str,
+                          direction: str, occurred_at: datetime) -> None:
+    await db.execute(
+        "INSERT INTO gate_rejections(rejection_id, occurred_at, "
+        "config_version, symbol, direction, stage, gate_id, tier, hard_gate, "
+        "shadow_eligible, note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (f"rej_{symbol}_{gate_id}_{occurred_at:%H%M%S%f}",
+         occurred_at.isoformat(), "v-test", symbol, direction, stage,
+         gate_id, 1, 1, 0, "test"))
+
+
+@pytest.mark.asyncio
+async def test_symbol_session_history_reports_todays_refusals(db):
+    await _seed_config_version(db, "v-test",
+                               (NOW - timedelta(days=3)).isoformat())
+    await _seed_rejection(db, "AMD", "RISK", "RISK_PER_TRADE_LOSS",
+                          "BULLISH", NOW - timedelta(hours=2))
+    await db.execute(
+        "INSERT INTO decisions(decision_id, config_version, symbol, state, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        ("dec_h1", "v-test", "AMD", "RISK_REJECTED",
+         (NOW - timedelta(hours=3)).isoformat(),
+         (NOW - timedelta(hours=3)).isoformat()))
+    await db.execute(
+        "INSERT INTO trade_proposals(proposal_id, decision_id, revision, "
+        "symbol, trade, direction, confidence, expected_horizon_days, "
+        "desired_portfolio_risk_pct, thesis, catalyst_summary, "
+        "abstain_reason, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("prop_h1", "dec_h1", 0, "AMD", 0, "BULLISH", 0.5, 5, 0.0, "t", "c",
+         "insufficient edge", (NOW - timedelta(hours=3)).isoformat()))
+
+    history = await symbol_session_history(db, "AMD", now=NOW)
+    assert history is not None
+    assert history["todays_refusals"][0]["gate_id"] == "RISK_PER_TRADE_LOSS"
+    assert history["todays_abstains"][0]["reason"] == "insufficient edge"
+    # A clean symbol ships no section at all.
+    assert await symbol_session_history(db, "NVDA", now=NOW) is None
+
+
+def _cand(symbol: str, track=CandidateTrack.MOMENTUM) -> CandidateFeatures:
+    return CandidateFeatures(
+        symbol=symbol, as_of=NOW, direction=Direction.BULLISH,
+        combined_direction=0.45, track=track,
+        discovery_source=DiscoverySource.CORE, momentum_score=78.0,
+        relative_volume_score=72.0, trend_regime_score=75.0,
+        relative_strength_score=68.0, options_opportunity_score=78.0,
+        options_liquidity_score=82.0, data_confidence_factor=1.0,
+        regime_factor=1.0, event_risk_factor=1.0, pre_score=74.0)
+
+
+def _bare_session(db, cfg: dict) -> TradingSession:
+    return TradingSession(
+        db=db, scanner=None, orchestrator=None, tiers=None, monitor=None,
+        shadows=None, journal=None, orders=None, market=None, screeners=None,
+        budget=None, config=cfg, risk_config={}, universe_config={})
+
+
+@pytest.mark.asyncio
+async def test_recent_risk_rejection_skips_the_council_seat(db):
+    await _seed_config_version(db, "v-test",
+                               (NOW - timedelta(days=3)).isoformat())
+    from alpha_council.utils.time import utc_now as real_now
+    recent = real_now() - timedelta(hours=1)
+    await _seed_rejection(db, "NVDA", "RISK", "RISK_PER_TRADE_LOSS",
+                          "BULLISH", recent)
+    # Infrastructure failure at the Red Team stage is NOT a refusal.
+    await _seed_rejection(db, "AMD", "RED_TEAM", "COUNCIL_RED_TEAM_FAILED",
+                          "BULLISH", recent)
+
+    session = _bare_session(db, {"council_seats": {
+        "rejection_cooldown_hours": 4.0, "abstain_cooldown_hours": 0.0,
+        "reserve_event_seat": False}})
+    seats = await session._allocate_council_seats(
+        [_cand("NVDA"), _cand("AMD")], max_councils=2)
+    assert [c.symbol for c in seats] == ["AMD"]
+
+
+@pytest.mark.asyncio
+async def test_red_team_veto_skips_but_other_direction_does_not(db):
+    await _seed_config_version(db, "v-test",
+                               (NOW - timedelta(days=3)).isoformat())
+    from alpha_council.utils.time import utc_now as real_now
+    recent = real_now() - timedelta(hours=1)
+    await _seed_rejection(db, "NVDA", "RED_TEAM", "RED_TEAM_VETO",
+                          "BULLISH", recent)
+    await _seed_rejection(db, "AMD", "RISK", "RISK_SECTOR_RISK",
+                          "BEARISH", recent)   # candidate below is BULLISH
+
+    session = _bare_session(db, {"council_seats": {
+        "rejection_cooldown_hours": 4.0, "abstain_cooldown_hours": 0.0,
+        "reserve_event_seat": False}})
+    seats = await session._allocate_council_seats(
+        [_cand("NVDA"), _cand("AMD")], max_councils=2)
+    assert [c.symbol for c in seats] == ["AMD"]
+
+
+def test_outcome_sections_reach_the_pm_and_only_the_pm_roles():
+    builder = EvidenceBuilder(
+        candidate=_cand("NVDA"),
+        recent_outcomes={"aggregate": {"closed_trades": 2}},
+        symbol_history={"todays_refusals": []},
+        market_prior={"p_finish_above_spot": 0.51})
+    pm = builder.build("PM").sections
+    assert "recent_outcomes" in pm and "symbol_session_history" in pm
+    assert "market_implied_prior" in pm
+
+    bull = builder.build("BULL").sections
+    assert "recent_outcomes" not in bull          # analysts stay independent
+    assert "market_implied_prior" in bull         # but see the market crowd
+
+    selection = builder.build("SELECTION").sections
+    assert "recent_outcomes" not in selection
+    assert "market_implied_prior" not in selection
+
+
+# ======================================================================
+# 16. Hackathon review idea #3 - evolution evidence windowed on
+#     uniform-config spans (tier escalations collapse onto their base;
+#     config churn stops being a reason to refuse analysis)
+# ======================================================================
+
+def test_span_base_collapses_tier_versions_only():
+    assert span_base("v2.6-hackathon-1") == "v2.6-hackathon-1"
+    assert span_base("v2.6-hackathon-1-t2-143055-ab12") == "v2.6-hackathon-1"
+    assert span_base("v2.5-measured-2-t3-090000-0f3c") == "v2.5-measured-2"
+    assert span_base(None) == ""
+
+
+async def _seed_two_spans(db) -> None:
+    t = NOW - timedelta(days=10)
+    await _seed_config_version(db, "vA", t.isoformat())
+    await _seed_config_version(db, "vA-t2-120000-ab12",
+                               (t + timedelta(hours=3)).isoformat(), tier=2)
+    await _seed_config_version(db, "vB", (t + timedelta(days=5)).isoformat())
+    await _seed_config_version(db, "vB-t3-141500-cd34",
+                               (t + timedelta(days=5, hours=5)).isoformat(),
+                               tier=3)
+    rows = [("dec_s1", "vA"), ("dec_s2", "vA-t2-120000-ab12"),
+            ("dec_s3", "vB"), ("dec_s4", "vB-t3-141500-cd34")]
+    for decision_id, version in rows:
+        await db.execute(
+            "INSERT INTO decisions(decision_id, config_version, symbol, "
+            "state, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+            (decision_id, version, "NVDA", "CLOSED",
+             t.isoformat(), t.isoformat()))
+    await db.execute(
+        "INSERT INTO trade_journal(trade_id, decision_id, opened_at, "
+        "closed_at, status, qty, entry_debit, realized_pnl, thesis) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("tr_s1", "dec_s1", t.isoformat(), t.isoformat(), "CLOSED", 1,
+         5.0, 10.0, "t"))
+    await db.execute(
+        "INSERT INTO trade_journal(trade_id, decision_id, opened_at, "
+        "closed_at, status, qty, entry_debit, realized_pnl, thesis) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("tr_s3", "dec_s3", t.isoformat(), t.isoformat(), "CLOSED", 1,
+         5.0, -5.0, "t"))
+
+
+@pytest.mark.asyncio
+async def test_config_spans_group_tier_versions_onto_their_base(db):
+    await _seed_two_spans(db)
+    spans = await config_spans(db)
+    assert [s["base_version"] for s in spans] == ["vA", "vB"]
+    assert spans[0]["version_count"] == 2
+    assert spans[0]["decisions"] == 2
+    assert spans[0]["closed_trades"] == 1
+    assert spans[0]["pnl"] == pytest.approx(10.0)
+    assert spans[0]["ended_at"] == spans[1]["started_at"]
+    assert spans[1]["ended_at"] is None
+    assert spans[1]["pnl"] == pytest.approx(-5.0)
+
+
+@pytest.mark.asyncio
+async def test_current_span_is_the_latest_base(db):
+    await _seed_two_spans(db)
+    versions, meta = await current_span_versions(db)
+    assert versions == ["vB", "vB-t3-141500-cd34"]
+    assert meta["base_version"] == "vB"
+    assert meta["decisions"] == 2
+
+
+class _FakeRegistry:
+    """Champion exists, no active challenger; the pre-gate decides."""
+
+    async def current_champion(self):
+        return {"strategy_id": "champ_1"}
+
+    async def active_challenger(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_evolution_pre_gate_counts_only_the_current_span(db):
+    from alpha_council.agents.alpha_evolution import AlphaEvolutionAgent
+
+    await _seed_two_spans(db)   # current span (vB) holds 2 observations
+    agent = AlphaEvolutionAgent(
+        client=None, db=db, registry=_FakeRegistry(),
+        config={"alpha_evolution": {
+            "competition": {"min_observations_to_propose": 3}}})
+    # 4 all-time observations would pass the old gate; the 2 in the
+    # current span must not. client=None proves no model call was made.
+    assert await agent.post_close_review({}) is None
+    row = await db.fetchone(
+        "SELECT message FROM system_events WHERE event_type='NO_CHANGE' "
+        "ORDER BY occurred_at DESC LIMIT 1")
+    assert "current config span" in row["message"]
+    assert "vB" in row["message"]
+
+
+# ======================================================================
+# 17. Hackathon review idea #5 - chain-implied priors, Brier-scored
+# ======================================================================
+
+def test_chain_implied_reads_the_straddle_and_the_digitals():
+    calls = {98.0: 3.10, 99.0: 2.50, 100.0: 1.95, 101.0: 1.50, 102.0: 1.10}
+    puts = {98.0: 1.00, 99.0: 1.40, 100.0: 1.90, 101.0: 2.50, 102.0: 3.00}
+    implied = chain_implied(100.0, calls, puts)
+    assert implied.usable
+    assert implied.atm_strike == 100.0
+    assert implied.expected_move_pct == pytest.approx(0.0385)
+    assert implied.p_up_calls == pytest.approx(0.45)
+    assert implied.p_up_puts == pytest.approx(0.40)
+    assert implied.p_up == pytest.approx(0.425)
+
+
+def test_chain_implied_refuses_a_coarse_strike_grid():
+    # 95/105 around spot 100: a 10% gap cannot seat a digital read.
+    implied = chain_implied(100.0, {95.0: 6.0, 105.0: 1.0},
+                            {95.0: 1.0, 105.0: 6.0})
+    assert not implied.usable
+    assert implied.reason
+
+
+def test_chain_implied_needs_a_two_sided_straddle():
+    implied = chain_implied(100.0, {100.0: 1.95, 101.0: 1.50}, {})
+    assert not implied.usable
+    assert "straddle" in implied.reason
+
+
+class _FakePriorsApi:
+    def __init__(self, contracts, snapshots):
+        self._contracts = contracts
+        self._snapshots = snapshots
+        self.bars: dict[str, list[dict]] = {}
+
+    async def get_option_contracts(self, underlying, **kwargs):
+        return self._contracts
+
+    async def get_option_snapshots(self, occs):
+        return {o: self._snapshots[o] for o in occs if o in self._snapshots}
+
+    async def get_stock_bars(self, symbols, timeframe, start, end):
+        return {s: self.bars.get(s, []) for s in symbols}
+
+
+def _occ(strike: float, letter: str) -> str:
+    return f"SPY260910{letter}{int(strike * 1000):08d}"
+
+
+PRIORS_CFG = {"priors": {
+    "enabled": True, "etf_cohort": ["SPY"], "horizon_days": 7,
+    "refresh_minutes": 90, "strike_band_pct": 0.08,
+    "max_leg_spread_pct": 0.25, "max_strike_gap_pct": 0.02,
+    "cohort_added": "2026-08-01", "cohort_review_date": "2026-11-20"}}
+
+
+@pytest.mark.asyncio
+async def test_compute_one_persists_a_usable_prior(db):
+    call_mids = {98.0: 3.10, 99.0: 2.50, 100.0: 1.95, 101.0: 1.50,
+                 102.0: 1.10}
+    put_mids = {98.0: 1.00, 99.0: 1.40, 100.0: 1.90, 101.0: 2.50,
+                102.0: 3.00}
+    contracts, snapshots = [], {}
+    for strike, mid in call_mids.items():
+        occ = _occ(strike, "C")
+        contracts.append({"expiration_date": "2026-09-10", "symbol": occ})
+        snapshots[occ] = {"latestQuote": {"bp": mid - 0.05, "ap": mid + 0.05}}
+    for strike, mid in put_mids.items():
+        occ = _occ(strike, "P")
+        contracts.append({"expiration_date": "2026-09-10", "symbol": occ})
+        snapshots[occ] = {"latestQuote": {"bp": mid - 0.05, "ap": mid + 0.05}}
+
+    service = PriorsService(_FakePriorsApi(contracts, snapshots), None, db,
+                            PRIORS_CFG)
+    row = await service.compute_one("SPY", 100.0, now=NOW)
+    assert row["usable"] == 1
+    assert row["expected_move_pct"] == pytest.approx(0.0385)
+    assert row["p_up"] == pytest.approx(0.425)
+    stored = await db.fetchone(
+        "SELECT * FROM market_priors WHERE symbol='SPY'")
+    assert stored is not None and stored["usable"] == 1
+    assert stored["expiry"] == "2026-09-10"
+
+
+@pytest.mark.asyncio
+async def test_score_due_briers_against_the_spot_it_was_handed(db):
+    await db.execute(
+        "INSERT INTO market_priors(prior_id, symbol, asof, source, spot, "
+        "expiry, horizon_days, expected_move_pct, p_up, usable, inputs_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("pri_test1", "SPY", (NOW - timedelta(days=8)).isoformat(), "CHAIN",
+         100.0, "2026-08-31", 7, 0.0385, 0.7, 1, "{}"))
+    api = _FakePriorsApi([], {})
+    api.bars["SPY"] = [{"c": 103.0, "t": "2026-08-31T20:00:00Z"}]
+    service = PriorsService(api, None, db, PRIORS_CFG)
+
+    assert await service.score_due(now=NOW) == 1
+    score = await db.fetchone("SELECT * FROM prior_scores")
+    assert score["outcome_up"] == 1
+    assert score["brier"] == pytest.approx((0.7 - 1.0) ** 2)
+    assert score["realized_return"] == pytest.approx(0.03)
+    assert score["within_expected_move"] == 1
+    # Idempotent: a second pass scores nothing.
+    assert await service.score_due(now=NOW) == 0
+
+
+@pytest.mark.asyncio
+async def test_cohort_review_renders_every_cohort_symbol(db):
+    text = await build_cohort_review(db, PRIORS_CFG, now=NOW)
+    assert "# ETF Cohort Review" in text
+    assert "### SPY" in text
+    assert "Expansion decision checklist" in text

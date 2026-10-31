@@ -45,6 +45,23 @@ objections you cannot answer, and structures that lose even under your
 own primary scenario. The Red Team and the Risk Constitution sit
 downstream to check you; do not pre-empt their veto with your own.
 
+If the package contains recent_outcomes, it is the system's own recent
+closed-trade record, computed deterministically. Use it to avoid repeating
+structural mistakes - theses that invalidated within hours, targets the
+holding period never delivered. It is context, not a mood: do not abstain
+merely because losses appear there, and do not chase merely because wins
+do. If it contains symbol_session_history, this symbol was already heard
+today and refused or abstained at the recorded stage; propose again only
+if the evidence has materially changed since.
+
+If the package contains market_implied_prior, that is the option market's
+own risk-neutral forecast: an expected move and P(finish above spot) for a
+nearby expiry. p near 0.5 is normal and is not evidence against a thesis.
+Check your price targets and invalidation levels against the expected
+move: a thesis requiring a move far beyond it within your horizon needs
+extraordinary evidence, and one well inside it should say what the market
+is mispricing. Do not recompute these numbers.
+
 The option prices in your evidence package come from Alpaca's Indicative
 Pricing Feed, not OPRA NBBO. A quote timestamp may be fresh while the quoted
 value is still a derived estimate. Each leg carries quote_lag_seconds,

@@ -795,6 +795,42 @@ CREATE TABLE IF NOT EXISTS promotion_recommendations (
 );
 
 -- ----------------------------------------------------------------------
+-- market-implied priors (hackathon review idea #5, 2026-10-30)
+-- Chain-implied expected move + risk-neutral P(up), Brier-scored at
+-- expiry. Definitions mirror alpha_council/quant/priors.py PRIORS_DDL,
+-- which applies them idempotently at startup for pre-existing databases.
+-- ----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS market_priors (
+    prior_id          TEXT PRIMARY KEY,
+    symbol            TEXT NOT NULL,
+    asof              TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'CHAIN',
+    spot              REAL NOT NULL,
+    expiry            TEXT NOT NULL,
+    horizon_days      INTEGER NOT NULL,
+    expected_move_pct REAL,
+    p_up              REAL,
+    usable            INTEGER NOT NULL CHECK(usable IN (0,1)),
+    unusable_reason   TEXT,
+    inputs_json       TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(symbol, source, asof)
+);
+CREATE INDEX IF NOT EXISTS idx_market_priors_symbol
+    ON market_priors(symbol, asof DESC);
+
+CREATE TABLE IF NOT EXISTS prior_scores (
+    score_id             TEXT PRIMARY KEY,
+    prior_id             TEXT NOT NULL UNIQUE REFERENCES market_priors(prior_id),
+    scored_at            TEXT NOT NULL,
+    realized_close       REAL NOT NULL,
+    realized_return      REAL NOT NULL,
+    outcome_up           INTEGER NOT NULL CHECK(outcome_up IN (0,1)),
+    brier                REAL NOT NULL,
+    within_expected_move INTEGER CHECK(within_expected_move IN (0,1))
+);
+
+-- ----------------------------------------------------------------------
 -- observability
 -- ----------------------------------------------------------------------
 

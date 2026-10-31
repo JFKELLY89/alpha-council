@@ -20,6 +20,13 @@ Rules:
   proposal if you touch one.
 - Do not infer improvement from a single ticker, single trade, or one
   unusually large winner. Look for repeated patterns across decisions.
+- Evidence arrives windowed by uniform_config_spans: a span is one base
+  configuration (intraday tier escalations collapse onto their base).
+  Different spans are different experiments. Draw conclusions from
+  current_span_performance, use earlier spans only to form hypotheses,
+  and never pool trades across spans as one sample. Configuration churn
+  is windowed for you and is NOT a reason to decline; if you decline,
+  the stated reason must be about the CURRENT span's evidence.
 - State the expected benefit AND the most plausible failure mode.
 - During competition mode all Challengers are shadow-only and promotion
   requires operator approval; write nothing that assumes otherwise.

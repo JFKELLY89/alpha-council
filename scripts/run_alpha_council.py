@@ -73,6 +73,7 @@ from alpha_council.models.enums import MarkMethod  # noqa: E402
 from alpha_council.options_engine.chain import ChainService  # noqa: E402
 from alpha_council.orchestrator import Orchestrator, TierManager  # noqa: E402
 from alpha_council.quant.discovery import DiscoveryService, UniverseManager  # noqa: E402
+from alpha_council.quant.priors import PriorsService  # noqa: E402
 from alpha_council.quant.scanner import FunnelScanner  # noqa: E402
 from alpha_council.risk.constitution import RiskConstitution, load_blackouts  # noqa: E402
 from alpha_council.scheduler import (  # noqa: E402
@@ -182,6 +183,18 @@ async def run(args: argparse.Namespace) -> int:
                               int(options_cfg.get("chain_cache_seconds", 60)))
         scanner = FunnelScanner(discovery, chains, db, scoring)
         say(f"  core universe    : {len(core)} symbols")
+
+        # Market-implied priors (hackathon review idea #5): chain-implied
+        # expected move + P(up) for the ETF cohort, Brier-scored nightly.
+        # ensure_schema() upgrades a pre-existing database in place.
+        priors = PriorsService(api, market, db, scoring)
+        await priors.ensure_schema()
+        if priors.enabled and priors.cohort:
+            say(f"  chain priors     : {len(priors.cohort)} ETF cohort "
+                f"({', '.join(priors.cohort)}), horizon "
+                f"{priors.horizon_days}d, review {priors.review_date}")
+        else:
+            say("  chain priors     : disabled")
 
         # ---- agents --------------------------------------------------
         budget = BudgetManager(db, scoring)
@@ -302,7 +315,7 @@ async def run(args: argparse.Namespace) -> int:
             config=scoring, risk_config=risk_cfg,
             universe_config=universe_cfg, news=news, sec=sec,
             rejected_shadows=rejected_shadows,
-            evolution=evolution, premarket=premarket,
+            evolution=evolution, premarket=premarket, priors=priors,
             max_trades=args.max_trades, dry_run=args.dry_run)
 
         await db.log_event(

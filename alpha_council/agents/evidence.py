@@ -144,7 +144,10 @@ class EvidenceBuilder:
                  portfolio_state: dict[str, Any] | None = None,
                  market_summary: dict[str, Any] | None = None,
                  scheduled_events: Sequence[dict[str, Any]] = (),
-                 session_briefing: str | None = None):
+                 session_briefing: str | None = None,
+                 recent_outcomes: dict[str, Any] | None = None,
+                 symbol_history: dict[str, Any] | None = None,
+                 market_prior: dict[str, Any] | None = None):
         self.c = candidate
         self.events = list(intel_events)
         self.structures = list(structures)
@@ -152,6 +155,9 @@ class EvidenceBuilder:
         self.market = market_summary or {}
         self.scheduled = list(scheduled_events)
         self.briefing = session_briefing
+        self.outcomes = recent_outcomes or {}
+        self.symbol_history = symbol_history or {}
+        self.market_prior = market_prior or {}
 
     # ---- shared sections ------------------------------------------
 
@@ -227,6 +233,21 @@ class EvidenceBuilder:
             s["portfolio_state"] = self.portfolio
             s["scheduled_event_risk"] = self.scheduled[:5]
 
+        # Hackathon review idea #2: the PM proposed with zero knowledge of
+        # how its earlier proposals ended, and refused symbols re-consumed
+        # seats the same day. Both blocks are SQL facts; the model
+        # interprets, never recomputes.
+        if self.outcomes and role in ("PM", "RED_TEAM", "REVISION"):
+            s["recent_outcomes"] = self.outcomes
+        if self.symbol_history and role in ("PM", "RED_TEAM", "REVISION"):
+            s["symbol_session_history"] = self.symbol_history
+
+        # Idea #5: the option market's own implied distribution for this
+        # underlying, usability-gated upstream and Brier-scored nightly.
+        if self.market_prior and role in ("BULL", "BEAR", "CATALYST", "PM",
+                                          "RED_TEAM"):
+            s["market_implied_prior"] = self.market_prior
+
         if role in ("SELECTION", "RED_TEAM", "REVISION"):
             s["top_option_structures"] = [
                 _structure_dict(x) for x in self.structures[:5]]
@@ -280,7 +301,9 @@ class EvidenceBuilder:
         Never drops candidate_features, the data caveat, or the option
         structures: those are what the agent is being asked about.
         """
-        order = ["session_briefing", "market_summary", "scheduled_event_risk",
+        order = ["session_briefing", "recent_outcomes",
+                 "symbol_session_history", "market_implied_prior",
+                 "market_summary", "scheduled_event_risk",
                  "intelligence_events", "analyst_assessments"]
         for key in order:
             if pkg.token_estimate <= cap_tokens:

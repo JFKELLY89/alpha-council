@@ -97,16 +97,35 @@ class AlphaEvolutionAgent:
             return None
 
         # Deterministic evidence pre-gate: below the floor, NO CHANGE
-        # without spending a token.
+        # without spending a token. Windowed to the CURRENT uniform-config
+        # span (hackathon review idea #3): counting all-time decisions let
+        # evidence gathered under configurations two bases ago gate a
+        # proposal about today's, and showing the model that unwindowed
+        # history is what twice made it refuse on "too many config
+        # versions".
+        from alpha_council.evolution.lessons import current_span_versions
+
         min_obs = int(self.evolution_cfg.get("competition", {}).get(
             "min_observations_to_propose", 8))
-        row = await self.db.fetchone("SELECT COUNT(*) AS n FROM decisions")
+        span_versions, span_meta = await current_span_versions(self.db)
+        if span_versions:
+            marks = ",".join("?" for _ in span_versions)
+            row = await self.db.fetchone(
+                f"SELECT COUNT(*) AS n FROM decisions "
+                f"WHERE config_version IN ({marks}) "
+                f"AND COALESCE(candidate_track,'') != 'CALIBRATION'",
+                tuple(span_versions))
+        else:
+            row = await self.db.fetchone("SELECT COUNT(*) AS n FROM decisions")
         observations = int((row or {}).get("n") or 0)
         if observations < min_obs:
+            base = (span_meta or {}).get("base_version", "unversioned")
+            since = str((span_meta or {}).get("started_at", ""))[:10]
             await self.db.log_event(
                 "INFO", "evolution", "NO_CHANGE",
-                f"{observations} observations < {min_obs} floor; the "
-                "correct evolution output is NO CHANGE")
+                f"{observations} observations in the current config span "
+                f"({base} since {since}) < {min_obs} floor; the correct "
+                "evolution output is NO CHANGE")
             return None
 
         champion_config = await self.registry.champion_config()

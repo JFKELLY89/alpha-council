@@ -117,4 +117,10 @@ sectors:
   ENERGY:      [XOM, CVX, COP, SLB]
   HEALTH:      [LLY, UNH, JNJ, ABBV, MRK, PFE]
   INDUSTRIAL:  [CAT, DE, GE, RTX, BA, UPS]
-  INDEX:       [SPY, QQQ, IWM, DIA]
+  # 2026-10-30 ETF cohort: SPY/VOO track the same index and QQQ/VUG are
+  # heavily correlated, so one INDEX bucket makes the 4% cap treat the
+  # equity-index complex as one bet. GLD and TLT are genuinely distinct
+  # exposures and get their own buckets.
+  INDEX:       [SPY, QQQ, IWM, DIA, VOO, VUG, SCHD]
+  COMMODITY:   [GLD]
+  RATES:       [TLT]

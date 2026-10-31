@@ -32,6 +32,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from alpha_council.agents.evidence import EvidenceBuilder
+from alpha_council.agents.outcomes import recent_outcomes, symbol_session_history
 from alpha_council.db.engine import Database
 from alpha_council.intelligence.news import NewsIntelligence
 from alpha_council.models.candidate import CandidateFeatures
@@ -113,6 +114,7 @@ class TradingSession:
                  rejected_shadows: Any = None,
                  evolution: Any = None,
                  premarket: Any = None,
+                 priors: Any = None,
                  max_trades: int | None = None, dry_run: bool = False):
         self.db = db
         self.scanner = scanner
@@ -131,6 +133,7 @@ class TradingSession:
         self.sec = sec
         self.evolution = evolution
         self.premarket = premarket
+        self.priors = priors
         self.session_briefing: str | None = None
         self.config = config
         self.risk_config = risk_config
@@ -254,9 +257,31 @@ class TradingSession:
         cfg = self.config.get("council_seats", {})
         cooldown_h = float(cfg.get("abstain_cooldown_hours", 2.0))
         rescore = float(cfg.get("abstain_rescore_delta", 4.0))
+        rejection_h = float(cfg.get("rejection_cooldown_hours", 4.0))
 
         eligible: list[CandidateFeatures] = []
         for candidate in finalists:
+            # Hackathon review idea #2 (deterministic half): a thesis the
+            # Risk Constitution refused or the Red Team vetoed does not
+            # re-consume a council seat the same session. Only genuine
+            # refusals count - infrastructure failures (model timeouts,
+            # schema errors) and unfilled walks stay retryable.
+            if rejection_h > 0:
+                cutoff_r = (utc_now()
+                            - timedelta(hours=rejection_h)).isoformat()
+                refused = await self.db.fetchone(
+                    "SELECT gate_id, occurred_at FROM gate_rejections "
+                    "WHERE symbol = ? AND direction = ? AND occurred_at >= ? "
+                    "AND (stage = 'RISK' OR gate_id = 'RED_TEAM_VETO') "
+                    "ORDER BY occurred_at DESC LIMIT 1",
+                    (candidate.symbol, str(candidate.direction), cutoff_r))
+                if refused is not None:
+                    await self.log(
+                        "INFO", "COUNCIL_SKIP_RECENT_REJECTION",
+                        f"{candidate.symbol}: {refused['gate_id']} at "
+                        f"{str(refused['occurred_at'])[:16]}Z within "
+                        f"{rejection_h:.0f}h; seat passes on")
+                    continue
             recent = None
             if cooldown_h > 0:
                 cutoff = (utc_now()
@@ -353,6 +378,23 @@ class TradingSession:
                             "benchmark_return": round(benchmark_return, 5),
                             "tier": self.tiers.tier})
 
+            # Idea #5: refresh the ETF cohort's chain-implied priors (the
+            # per-symbol freshness gate lives inside) and idea #2's outcome
+            # feedback. Both are deterministic evidence; a failure costs
+            # the section, never the scan.
+            prior_map: dict[str, Any] = {}
+            if self.priors is not None:
+                try:
+                    prior_map = await self.priors.compute_cohort(utc_now())
+                except Exception as exc:  # noqa: BLE001
+                    await self.log("WARN", "PRIORS_FAILED", str(exc)[:200])
+            outcomes_block = None
+            try:
+                outcomes_block = await recent_outcomes(self.db)
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "OUTCOMES_BLOCK_FAILED",
+                               str(exc)[:200])
+
             allowed, reason = self.can_open()
             per_scan = int(
                 self.tiers.tier_config().get("max_councils_per_scan", 3))
@@ -377,11 +419,21 @@ class TradingSession:
                 # price level to anchor an invalidation on" - because the
                 # evidence carried scores but never the price itself.
                 spot = structures[0].underlying_price
+                history = None
+                try:
+                    history = await symbol_session_history(
+                        self.db, candidate.symbol)
+                except Exception as exc:  # noqa: BLE001 - advisory section
+                    await self.log("WARN", "SYMBOL_HISTORY_FAILED",
+                                   f"{candidate.symbol}: {exc}"[:200])
                 builder = EvidenceBuilder(
                     candidate=candidate,
                     intel_events=raw_events.get(candidate.symbol, []),
                     structures=structures,
                     portfolio_state=self._portfolio_summary(portfolio),
+                    recent_outcomes=outcomes_block,
+                    symbol_history=history,
+                    market_prior=prior_map.get(candidate.symbol),
                     market_summary={
                         "tier": self.tiers.tier,
                         "underlying_price": spot,
@@ -538,6 +590,26 @@ class TradingSession:
                        f"${report['cost_usd']:.4f} spend",
                        {"report": report, "performance": performance,
                         "budget": self.budget.summary()})
+
+        # Idea #5 nightly discipline: Brier-score every prior whose expiry
+        # passed, and on/after the cohort review date write the one-shot
+        # ETF cohort review for the operator. Measurement only; fenced.
+        if self.priors is not None:
+            try:
+                scored = await self.priors.score_due()
+                if scored:
+                    await self.log("INFO", "PRIORS_SCORED",
+                                   f"{scored} chain prior(s) Brier-scored "
+                                   "against realized closes")
+                review_path = await self.priors.maybe_cohort_review()
+                if review_path:
+                    await self.log(
+                        "WARN", "ETF_COHORT_REVIEW",
+                        f"three-week ETF cohort review written to "
+                        f"{review_path}; operator review requested")
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "PRIORS_POST_CLOSE_FAILED",
+                               str(exc)[:200])
 
         # v2.5 §21: lessons -> at most one challenger proposal -> shadow
         # evaluation -> deterministic performance -> promotion
