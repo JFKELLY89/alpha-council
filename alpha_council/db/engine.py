@@ -41,6 +41,7 @@ REQUIRED_TABLES = {
     "strategy_shadow_decisions", "strategy_performance_snapshots",
     "promotion_recommendations",
     "market_priors", "prior_scores",
+    "sleeve_orders", "sleeve_snapshots", "sleeve_trades", "rhetoric_audits",
     "api_usage", "system_events",
 }
 

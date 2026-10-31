@@ -202,6 +202,64 @@ priors:
   max_leg_spread_pct: 0.25           # wider quotes are unreadable, not data
   max_strike_gap_pct: 0.02           # coarser grids cannot seat a digital
 
+# ----------------------------------------------------------------------
+# capital sleeves (operator rebalance, 2026-10-30)
+# Target allocation of WHOLE-ACCOUNT equity: 30% ETF beta sleeve, 30%
+# council-driven stock sleeve, options desk unchanged under its existing
+# hard caps (sizing review due 2026-11-30), remainder cash (~30% until
+# the options review, moving toward the operator's 20% target after it).
+# The options Constitution sizes and halts against OPTIONS NAV (account
+# equity minus total sleeve P&L), so sleeve beta can never halt or
+# inflate the options desk. Listed under alpha_evolution.immutable_paths:
+# evolution may never touch allocation.
+# ----------------------------------------------------------------------
+sleeves:
+  enabled: true
+  etf:
+    enabled: true
+    target_pct_of_equity: 30.0
+    # Within-sleeve weights (sum 100). VOO is the S&P core - SPY stays
+    # the options/priors workhorse, and holding both is one bet twice.
+    # QQQ+VUG carry the growth tilt the operator asked for, SCHD the
+    # dividend-value leg, GLD/TLT the uncorrelated diversifiers, IWM
+    # small-cap breadth. Operator-adjustable; these are defaults.
+    weights:
+      VOO: 30
+      QQQ: 15
+      VUG: 15
+      SCHD: 15
+      GLD: 10
+      TLT: 10
+      IWM: 5
+    rebalance_band_rel: 0.20        # trade only on 20% relative drift...
+    min_order_notional: 250.0       # ...and never for dust
+    max_order_pct_of_equity: 10.0   # single-order sanity ceiling
+    rebalance_time_et: "10:05"      # daily check; trades only out-of-band
+  stock:
+    enabled: true
+    target_pct_of_equity: 30.0
+    long_only: true                 # bearish theses abstain, never short
+    max_positions: 6
+    max_position_pct_of_equity: 6.0
+    risk_pct_of_equity_per_trade: 0.75  # stop-distance sizing cap
+    min_stop_distance_pct: 1.0      # tighter is churn, not a stop
+    max_stop_distance_pct: 12.0     # wider is a thesis, not a stop
+    councils_per_scan: 1            # unheard finalists get one seat
+    time_stop_horizon_multiple: 1.5
+    profit_target_r_multiple: 2.0
+    stop_confirm_minutes: 10        # a breach must hold (the DRAM lesson)
+
+# ----------------------------------------------------------------------
+# rhetoric audits (hackathon review idea #4, 2026-10-30; operator chose
+# the recommended defaults). REPORTING-ONLY by design: findings land in
+# rhetoric_audits and the nightly log; nothing here blocks a trade.
+# Scope: PM invalidation thresholds vs the decision's own recorded
+# levels, and exit reasons vs market facts. Structured fields only.
+# ----------------------------------------------------------------------
+rhetoric_audit:
+  enabled: true
+  tolerance_rel: 0.0075             # tolerant matching: 0.75% counts
+
 # Reward/risk is DERIVED, never asserted: RR = (1 - c/w) / (c/w).
 # Tier 1 max_cost_to_width 0.55 implies RR >= 0.82.
 
@@ -516,3 +574,6 @@ alpha_evolution:
     - budget.
     - rate_limits.
     - activity_target.
+    - sleeves.          # capital allocation is the operator's, never evolution's
+    - rhetoric_audit.
+    - priors.

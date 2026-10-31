@@ -72,9 +72,11 @@ from alpha_council.journal.trade_journal import TradeJournal  # noqa: E402
 from alpha_council.models.enums import MarkMethod  # noqa: E402
 from alpha_council.options_engine.chain import ChainService  # noqa: E402
 from alpha_council.orchestrator import Orchestrator, TierManager  # noqa: E402
+from alpha_council.audit import rhetoric  # noqa: E402
 from alpha_council.quant.discovery import DiscoveryService, UniverseManager  # noqa: E402
 from alpha_council.quant.priors import PriorsService  # noqa: E402
 from alpha_council.quant.scanner import FunnelScanner  # noqa: E402
+from alpha_council.sleeves import SleeveManager  # noqa: E402
 from alpha_council.risk.constitution import RiskConstitution, load_blackouts  # noqa: E402
 from alpha_council.scheduler import (  # noqa: E402
     SchedulerConfig,
@@ -260,6 +262,29 @@ async def run(args: argparse.Namespace) -> int:
                 cooldown_seconds=float(sec_cfg.get("cooldown_seconds", 600)))
             say("  sec collector    : enabled (EDGAR active-universe polling)")
 
+        # Capital sleeves (2026-10-30): 30% ETF beta, 30% council-driven
+        # stock sleeve, options desk unchanged against its own NAV.
+        sleeves = SleeveManager(orders, market, db, scoring,
+                                council=council, journal=journal)
+        await sleeves.ensure_schema()
+        await rhetoric.ensure_schema(db)
+        if sleeves.enabled:
+            stock_open = await sleeves.restore()
+            say(f"  sleeves          : ETF "
+                f"{'on' if sleeves.etf.enabled else 'off'} "
+                f"({sleeves.etf.target_pct:.0f}% across "
+                f"{len(sleeves.etf.symbols)} ETFs), STOCK "
+                f"{'on' if sleeves.stock.enabled else 'off'} "
+                f"({sleeves.stock.target_pct:.0f}%, "
+                f"{stock_open} open position(s) restored)")
+            acct = await sleeves.accounting()
+            say(f"  sleeve NAV       : MV ${acct.sleeve_market_value:,.2f}, "
+                f"invested ${acct.net_invested:,.2f}, "
+                f"P&L ${acct.sleeve_pnl_total:,.2f} "
+                "(options desk sizes against account equity minus this P&L)")
+        else:
+            say("  sleeves          : disabled")
+
         presubmit = PreSubmitRefresher(api, market, scoring)
         tiers = TierManager(scoring, config_version)
         tiers.start_session()
@@ -316,6 +341,7 @@ async def run(args: argparse.Namespace) -> int:
             universe_config=universe_cfg, news=news, sec=sec,
             rejected_shadows=rejected_shadows,
             evolution=evolution, premarket=premarket, priors=priors,
+            sleeves=sleeves,
             max_trades=args.max_trades, dry_run=args.dry_run)
 
         await db.log_event(

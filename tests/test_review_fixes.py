@@ -1133,3 +1133,314 @@ async def test_cohort_review_renders_every_cohort_symbol(db):
     assert "# ETF Cohort Review" in text
     assert "### SPY" in text
     assert "Expansion decision checklist" in text
+
+
+# ======================================================================
+# 18. Hackathon review idea #4 - rhetoric audits (reporting-only;
+#     operator chose the recommended defaults 2026-10-30)
+# ======================================================================
+
+NVDA_LEVELS = {"spot": 204.0, "long_strike_r1": 200.0,
+               "short_strike_r1": 210.0, "breakeven_r1": 205.2}
+
+
+def test_level_claim_grades_supported_derived_unsupported():
+    from alpha_council.audit.rhetoric import grade_level_claim
+
+    grade, _ = grade_level_claim(204.0, NVDA_LEVELS)
+    assert grade == "SUPPORTED"                  # matches spot exactly
+    grade, _ = grade_level_claim(198.0, NVDA_LEVELS)
+    assert grade == "DERIVED"                    # ordinary stop below spot
+    grade, detail = grade_level_claim(150.0, NVDA_LEVELS)
+    assert grade == "UNSUPPORTED"                # nothing shown comes near
+    assert "envelope" in detail
+    grade, _ = grade_level_claim(198.0, {})
+    assert grade == "NOT_CHECKABLE"
+
+
+def test_time_claim_grades_against_the_stated_horizon():
+    from alpha_council.audit.rhetoric import grade_time_claim
+
+    assert grade_time_claim(5.0, 5)[0] == "SUPPORTED"
+    assert grade_time_claim(10.0, 5)[0] == "DERIVED"
+    assert grade_time_claim(20.0, 5)[0] == "UNSUPPORTED"
+
+
+async def _seed_audited_decision(db, journal, decision_id: str) -> None:
+    await db.execute(
+        "INSERT INTO decisions(decision_id, config_version, symbol, state, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        (decision_id, "v-test", "NVDA", "FILLED",
+         (NOW - timedelta(hours=1)).isoformat(),
+         (NOW - timedelta(hours=1)).isoformat()))
+    await journal.record_structures(decision_id, [_structure()], None)
+    rules = json.dumps([
+        {"rule_type": "PRICE", "description": "close below support",
+         "threshold": 198.0, "comparator": "LT"},
+        {"rule_type": "PRICE", "description": "hallucinated level",
+         "threshold": 150.0, "comparator": "LT"},
+        {"rule_type": "TIME", "description": "thesis stale",
+         "threshold": 5.0, "comparator": "GTE"},
+    ])
+    await db.execute(
+        "INSERT INTO trade_proposals(proposal_id, decision_id, revision, "
+        "symbol, trade, direction, confidence, expected_horizon_days, "
+        "desired_portfolio_risk_pct, thesis, catalyst_summary, "
+        "invalidation_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (f"prop_{decision_id[-8:]}_r0", decision_id, 0, "NVDA", 1,
+         "BULLISH", 0.7, 5, 1.0, "t", "c", rules,
+         (NOW - timedelta(hours=1)).isoformat()))
+
+
+@pytest.mark.asyncio
+async def test_citation_audit_grades_each_invalidation_threshold(db):
+    from alpha_council.audit.rhetoric import audit_decision_citations
+
+    journal = TradeJournal(db)
+    await _seed_audited_decision(db, journal, "dec_rh1")
+    findings = await audit_decision_citations(
+        db, {"decision_id": "dec_rh1", "symbol": "NVDA"}, 0.0075)
+    grades = {f.claim_value: f.grade for f in findings}
+    assert grades[198.0] == "DERIVED"
+    assert grades[150.0] == "UNSUPPORTED"
+    assert grades[5.0] == "SUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_exit_claim_flags_an_after_hours_exit(db):
+    from alpha_council.audit.rhetoric import audit_closed_trade
+
+    # 20:36Z on 2026-09-01 is 16:36 ET - the after-hours loop's signature.
+    trade = {"decision_id": "dec_rh2", "symbol": "IBIT",
+             "exit_reason": "UNDERLYING_INVALIDATION",
+             "closed_at": "2026-09-01T20:36:00+00:00",
+             "invalidation_json": json.dumps(
+                 [{"rule_type": "PRICE", "description": "d",
+                   "threshold": 50.0, "comparator": "LT"}]),
+             "entry_debit": 5.0, "exit_credit": 4.0}
+    findings = await audit_closed_trade(db, trade, 0.0075)
+    by_subject = {f.subject: f.grade for f in findings}
+    assert by_subject["exit_rth:UNDERLYING_INVALIDATION"] == "INCONSISTENT"
+    # No stored bars in this test database: the level check says so
+    # rather than guessing.
+    assert by_subject["exit_level:UNDERLYING_INVALIDATION"] == "NOT_CHECKABLE"
+
+    trade["closed_at"] = "2026-09-01T19:30:00+00:00"    # 15:30 ET
+    findings = await audit_closed_trade(db, trade, 0.0075)
+    by_subject = {f.subject: f.grade for f in findings}
+    assert by_subject["exit_rth:UNDERLYING_INVALIDATION"] == "CONSISTENT"
+
+
+@pytest.mark.asyncio
+async def test_rhetoric_nightly_is_idempotent(db):
+    from alpha_council.audit.rhetoric import ensure_schema, run_nightly
+
+    await ensure_schema(db)
+    journal = TradeJournal(db)
+    await _seed_audited_decision(db, journal, "dec_rh3")
+    cfg = {"rhetoric_audit": {"enabled": True, "tolerance_rel": 0.0075}}
+
+    summary = await run_nightly(db, cfg, now=NOW)
+    assert summary["claims"] == 3
+    assert summary["unsupported"] == 1
+    first = await db.fetchvalue("SELECT COUNT(*) FROM rhetoric_audits")
+    await run_nightly(db, cfg, now=NOW)
+    second = await db.fetchvalue("SELECT COUNT(*) FROM rhetoric_audits")
+    assert first == second == 3
+
+
+# ======================================================================
+# 19. Capital sleeves - ETF planner and the isolation identity
+#     (operator rebalance 2026-10-30: 30% ETF / 30% stock / options
+#     unchanged against their own NAV)
+# ======================================================================
+
+def test_etf_plan_initial_buildup_buys_to_target():
+    from alpha_council.sleeves.etf_sleeve import plan_rebalance
+
+    plan = plan_rebalance(
+        equity=100_000.0, weights={"VOO": 50, "GLD": 50}, target_pct=30.0,
+        holdings={}, quotes={"VOO": {"bid": 499.0, "ask": 500.0},
+                             "GLD": {"bid": 299.0, "ask": 300.0}},
+        max_order_pct_of_equity=20.0)
+    assert plan.sleeve_target == pytest.approx(30_000.0)
+    by_symbol = {o.symbol: o for o in plan.orders}
+    assert by_symbol["VOO"].side == "buy"
+    assert by_symbol["VOO"].qty == 30          # floor(15000 / 500)
+    assert by_symbol["GLD"].qty == 50          # floor(15000 / 300)
+
+
+def test_etf_plan_respects_the_band_and_sells_first():
+    from alpha_council.sleeves.etf_sleeve import plan_rebalance
+
+    plan = plan_rebalance(
+        equity=100_000.0, weights={"VOO": 50, "GLD": 50}, target_pct=30.0,
+        holdings={"VOO": {"market_value": 20_000.0, "qty": 40},
+                  "GLD": {"market_value": 14_500.0, "qty": 48}},
+        quotes={"VOO": {"bid": 499.0, "ask": 500.0},
+                "GLD": {"bid": 299.0, "ask": 300.0}})
+    # GLD drift $500 sits inside the 20% band (threshold $3,000): held.
+    assert [o.symbol for o in plan.orders] == ["VOO"]
+    sell = plan.orders[0]
+    assert sell.side == "sell"
+    assert sell.qty == 10                      # floor(5000 / 499)
+
+
+def test_etf_plan_caps_single_orders_and_whole_shares():
+    from alpha_council.sleeves.etf_sleeve import plan_rebalance
+
+    plan = plan_rebalance(
+        equity=100_000.0, weights={"VOO": 100}, target_pct=30.0,
+        holdings={}, quotes={"VOO": {"bid": 499.0, "ask": 500.0}},
+        max_order_pct_of_equity=10.0)
+    assert plan.orders[0].qty == 20            # floor(10000 cap / 500)
+
+
+class _FakePositionsApi:
+    trade_base = ""
+
+    def __init__(self, positions):
+        self._positions = positions
+
+    async def _get(self, url, params=None):
+        return self._positions
+
+
+class _FakeOrdersHandle:
+    def __init__(self, positions):
+        self.api = _FakePositionsApi(positions)
+
+
+@pytest.mark.asyncio
+async def test_sleeve_isolation_identity(db):
+    from alpha_council.sleeves.accounting import read_accounting
+
+    # With no sleeve activity at all the adjustment is exactly zero: the
+    # pre-sleeve behavior, bit for bit.
+    empty = await read_accounting(_FakeOrdersHandle([]), db, set())
+    assert empty.sleeve_pnl_total == pytest.approx(0.0)
+    assert empty.options_nav(95_377.22) == pytest.approx(95_377.22)
+
+    positions = [
+        {"symbol": "VOO", "asset_class": "us_equity",
+         "market_value": "15500", "unrealized_intraday_pl": "120",
+         "qty": "31", "current_price": "500"},
+        # An option position must never count as sleeve value.
+        {"symbol": "NVDA260918C00200000", "asset_class": "us_option",
+         "market_value": "520", "unrealized_intraday_pl": "9", "qty": "1"},
+    ]
+    await db.execute(
+        "INSERT INTO sleeve_orders(order_pk, sleeve, client_order_id, "
+        "symbol, side, qty, limit_price, status, filled_qty, fill_price, "
+        "notional, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("ord1", "ETF", "cid1", "VOO", "buy", 31, 484.0, "filled", 31,
+         483.87, 15_000.0, NOW.isoformat()))
+
+    acct = await read_accounting(_FakeOrdersHandle(positions), db, {"VOO"})
+    assert acct.sleeve_market_value == pytest.approx(15_500.0)
+    assert acct.net_invested == pytest.approx(15_000.0)
+    assert acct.sleeve_pnl_total == pytest.approx(500.0)
+    assert acct.intraday_pl == pytest.approx(120.0)
+    # The identity: sleeve profit never inflates the options desk's NAV.
+    assert acct.options_nav(100_500.0) == pytest.approx(100_000.0)
+
+
+# ======================================================================
+# 20. Capital sleeves - stock sleeve sizing, stops, exits
+# ======================================================================
+
+def _rule(threshold, comparator="LT", rule_type="PRICE"):
+    from alpha_council.models.trading import InvalidationRule
+
+    return InvalidationRule(rule_type=rule_type, description="d",
+                            threshold=threshold, comparator=comparator)
+
+
+def test_usable_stop_takes_the_pms_tightest_price_rule():
+    from alpha_council.sleeves.stock_sleeve import usable_stop
+
+    assert usable_stop([_rule(198.0)], 204.0) == pytest.approx(198.0)
+    # Two qualifying stops: the tightest (highest) one binds.
+    assert usable_stop([_rule(195.0), _rule(198.0)],
+                       204.0) == pytest.approx(198.0)
+    # Too close is churn; too far is a thesis; wrong comparator and
+    # non-PRICE rules never become stops.
+    assert usable_stop([_rule(203.5)], 204.0) is None
+    assert usable_stop([_rule(170.0)], 204.0) is None
+    assert usable_stop([_rule(198.0, comparator="GT")], 204.0) is None
+    assert usable_stop([_rule(198.0, rule_type="VWAP")], 204.0) is None
+    assert usable_stop([], 204.0) is None
+
+
+def test_share_sizing_composes_every_cap_and_the_smallest_wins():
+    from alpha_council.sleeves.stock_sleeve import size_shares
+
+    # Risk-bound: min(2.0 requested, 0.75 cap) = $750 / $6 risk = 125,
+    # but the notional cap (6% = $6,000 / $204) binds at 29.
+    assert size_shares(100_000.0, 204.0, 198.0, 2.0, 0.75, 6.0,
+                       headroom=30_000.0) == 29
+    # Headroom binds when the sleeve is nearly full.
+    assert size_shares(100_000.0, 204.0, 198.0, 2.0, 0.75, 6.0,
+                       headroom=1_000.0) == 4
+    # A stop at/above entry can never size.
+    assert size_shares(100_000.0, 204.0, 204.0, 2.0, 0.75, 6.0,
+                       headroom=30_000.0) == 0
+
+
+def _stock_position(**overrides):
+    from alpha_council.sleeves.stock_sleeve import StockPosition
+
+    defaults = dict(trade_id="t1", decision_id="d1", symbol="NVDA",
+                    qty=10, entry_price=204.0, stop_price=198.0,
+                    target_price=216.0, horizon_days=5,
+                    opened_at=NOW - timedelta(days=1))
+    defaults.update(overrides)
+    return StockPosition(**defaults)
+
+
+def test_stock_exit_target_fires_immediately():
+    from alpha_council.sleeves.stock_sleeve import evaluate_stock_exit
+
+    reason, detail = evaluate_stock_exit(
+        _stock_position(), 216.5, NOW, stop_confirm_minutes=10,
+        horizon_multiple=1.5)
+    assert reason == "UNDERLYING_TARGET"
+    assert "216" in detail
+
+
+def test_stock_exit_time_stop_uses_the_horizon_multiple():
+    from alpha_council.sleeves.stock_sleeve import evaluate_stock_exit
+
+    position = _stock_position(opened_at=NOW - timedelta(days=8))
+    reason, _ = evaluate_stock_exit(position, 205.0, NOW,
+                                    stop_confirm_minutes=10,
+                                    horizon_multiple=1.5)
+    assert reason == "TIME_STOP"                 # 8d >= 5d x 1.5
+
+
+def test_stock_stop_needs_a_confirmed_breach():
+    from alpha_council.sleeves.stock_sleeve import evaluate_stock_exit
+
+    position = _stock_position()
+    # First breach starts the clock, does not fire.
+    reason, detail = evaluate_stock_exit(position, 197.0, NOW,
+                                         stop_confirm_minutes=10,
+                                         horizon_multiple=1.5)
+    assert reason is None and "confirming" in detail
+    # Still breached 11 minutes later: fires.
+    reason, _ = evaluate_stock_exit(position, 197.2,
+                                    NOW + timedelta(minutes=11),
+                                    stop_confirm_minutes=10,
+                                    horizon_multiple=1.5)
+    assert reason == "UNDERLYING_INVALIDATION"
+    # A recovery resets the clock entirely.
+    position2 = _stock_position()
+    evaluate_stock_exit(position2, 197.0, NOW, stop_confirm_minutes=10,
+                        horizon_multiple=1.5)
+    evaluate_stock_exit(position2, 199.0, NOW + timedelta(minutes=5),
+                        stop_confirm_minutes=10, horizon_multiple=1.5)
+    reason, _ = evaluate_stock_exit(position2, 197.0,
+                                    NOW + timedelta(minutes=12),
+                                    stop_confirm_minutes=10,
+                                    horizon_multiple=1.5)
+    assert reason is None                        # new breach, new clock

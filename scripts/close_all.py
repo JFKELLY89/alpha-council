@@ -193,6 +193,22 @@ async def run(args: argparse.Namespace) -> int:
             for position in orphans:
                 await close_orphan_leg(api, orders, position, args.execute)
 
+        # ---- 4b. capital sleeves (opt-in) ---------------------------
+        # The sleeves are NOT the options book: --sleeves liquidates the
+        # ETF basket and every open stock-sleeve position too, for a true
+        # whole-account flatten.
+        if args.sleeves:
+            rule("4b. SLEEVE LIQUIDATION (--sleeves)")
+            from alpha_council.sleeves import SleeveManager
+
+            sleeves = SleeveManager(orders, market, db, scoring)
+            await sleeves.ensure_schema()
+            await sleeves.restore()
+            for line in await sleeves.etf.liquidate_all(args.execute):
+                say(f"  ETF   {line}")
+            for line in await sleeves.stock.liquidate_all(args.execute):
+                say(f"  STOCK {line}")
+
         # ---- 5. verify --------------------------------------------
         rule("5. VERIFICATION")
         if not args.execute:
@@ -220,6 +236,9 @@ def main() -> int:
     ap.add_argument("--competition", action="store_true",
                     help="journal closes as COMPETITION_FLATTEN instead of "
                          "MANUAL")
+    ap.add_argument("--sleeves", action="store_true",
+                    help="also liquidate the ETF and stock sleeves "
+                         "(default: options book only)")
     try:
         return asyncio.run(run(ap.parse_args()))
     except KeyboardInterrupt:

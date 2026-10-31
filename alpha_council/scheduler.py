@@ -23,6 +23,7 @@ Place at: alpha_council/scheduler.py
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable, Sequence
@@ -33,6 +34,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from alpha_council.agents.evidence import EvidenceBuilder
 from alpha_council.agents.outcomes import recent_outcomes, symbol_session_history
+from alpha_council.audit import rhetoric
 from alpha_council.db.engine import Database
 from alpha_council.intelligence.news import NewsIntelligence
 from alpha_council.models.candidate import CandidateFeatures
@@ -115,6 +117,7 @@ class TradingSession:
                  evolution: Any = None,
                  premarket: Any = None,
                  priors: Any = None,
+                 sleeves: Any = None,
                  max_trades: int | None = None, dry_run: bool = False):
         self.db = db
         self.scanner = scanner
@@ -134,6 +137,9 @@ class TradingSession:
         self.evolution = evolution
         self.premarket = premarket
         self.priors = priors
+        self.sleeves = sleeves
+        self._account_equity = 0.0      # whole-account, pre-sleeve-adjust
+        self._sleeve_pnl_total = 0.0
         self.session_briefing: str | None = None
         self.config = config
         self.risk_config = risk_config
@@ -462,6 +468,25 @@ class TradingSession:
                     self.summary.trades_opened += 1
                     allowed, reason = self.can_open()
 
+            # Stock sleeve (2026-10-30): finalists the options seats never
+            # reached can still carry a thesis as LONG SHARES. Same
+            # analysts, same Red Team, deterministic sizing off the PM's
+            # own stop. Fenced: a sleeve failure never costs the scan.
+            if (self.sleeves is not None
+                    and getattr(self.sleeves, "enabled", False)
+                    and getattr(self.sleeves.stock, "enabled", False)):
+                try:
+                    stock_opened = await self._express_stock_sleeve(
+                        result, seats, raw_events, portfolio, prior_map,
+                        outcomes_block, rejections, allowed)
+                    if stock_opened:
+                        await self.log("INFO", "STOCK_SLEEVE_OPENED",
+                                       f"{stock_opened} share position(s) "
+                                       "opened", {"scan_id": scan_id})
+                except Exception as exc:  # noqa: BLE001
+                    await self.log("WARN", "STOCK_SLEEVE_FAILED",
+                                   str(exc)[:200])
+
             written = await rejections.flush()
             # The snapshot was persisted before the councils ran; without
             # this update every funnel row claimed zero councils.
@@ -472,6 +497,65 @@ class TradingSession:
                            f"{written} gate rejections recorded",
                            {"scan_id": scan_id,
                             "councils_started": councils_started})
+
+    async def _express_stock_sleeve(self, result: Any,
+                                    seats: Sequence[CandidateFeatures],
+                                    raw_events: dict[str, list[Any]],
+                                    portfolio: PortfolioState,
+                                    prior_map: dict[str, Any],
+                                    outcomes_block: dict[str, Any] | None,
+                                    rejections: RejectionLog,
+                                    allowed: bool) -> int:
+        """Offer unheard finalists to the stock sleeve's equity councils."""
+        seated = {c.symbol for c in seats}
+        option_held = {p.symbol for p in self.monitor.tracked}
+        leftovers = [c for c in result.final
+                     if c.symbol not in seated and c.symbol not in option_held]
+        if not leftovers:
+            return 0
+
+        async def stock_builder(candidate: CandidateFeatures
+                                ) -> EvidenceBuilder:
+            structures = result.structures_for(candidate.symbol)
+            spot = structures[0].underlying_price if structures else None
+            if not spot:
+                try:
+                    snaps = await self.market.snapshots([candidate.symbol])
+                    snap = snaps.get(candidate.symbol)
+                    spot = (float(snap.signal_price() or snap.mid or 0.0)
+                            if snap else None)
+                except Exception:  # noqa: BLE001 - sleeve gate catches it
+                    spot = None
+            history = None
+            try:
+                history = await symbol_session_history(self.db,
+                                                       candidate.symbol)
+            except Exception:  # noqa: BLE001 - advisory section only
+                history = None
+            return EvidenceBuilder(
+                candidate=candidate,
+                intel_events=raw_events.get(candidate.symbol, []),
+                structures=structures,
+                portfolio_state=self._portfolio_summary(portfolio),
+                market_summary={
+                    "tier": self.tiers.tier,
+                    "underlying_price": spot,
+                    "note": ("underlying_price is the live spot; your "
+                             "PRICE stop must sit 1-12% below it."),
+                },
+                scheduled_events=[],
+                session_briefing=self.session_briefing,
+                recent_outcomes=outcomes_block,
+                symbol_history=history,
+                market_prior=prior_map.get(candidate.symbol))
+
+        # Sizing runs against WHOLE-account equity: the sleeve owns 30% of
+        # the account, not 30% of the options desk's NAV.
+        equity = self._account_equity or portfolio.equity
+        return await self.sleeves.stock.consider(
+            leftovers, result.candidate_ids, equity, stock_builder,
+            self.summary.session_id, self.tiers.config_version,
+            rejections=rejections, execute=allowed and not self.dry_run)
 
     def _inject_offcore_news(self, universe_symbols: Sequence[str],
                              intel: dict[str, IntelSummary],
@@ -535,6 +619,47 @@ class TradingSession:
                                f"{decision_id}: {exit_decision.reason}",
                                {"detail": exit_decision.detail,
                                 "advisory": exit_decision.advisory})
+        # Stock-sleeve positions ride the same cadence: stop (confirmed),
+        # target, time stop. Fenced so a sleeve error never costs the
+        # options monitor.
+        if (self.sleeves is not None
+                and getattr(self.sleeves, "enabled", False)
+                and self.sleeves.stock.tracked):
+            try:
+                await self.sleeves.stock.poll(execute=not self.dry_run)
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "STOCK_MONITOR_FAILED",
+                               str(exc)[:200])
+
+    async def etf_rebalance(self) -> None:
+        """Daily ETF-sleeve band check. Trades only when a leg drifts.
+
+        Runs against WHOLE-account equity (the sleeve owns 30% of the
+        account), skips on halt and in dry runs, and logs the plan either
+        way so a quiet day is still auditable.
+        """
+        if self.sleeves is None or not getattr(self.sleeves, "enabled",
+                                               False):
+            return
+        if not self.sleeves.etf.enabled:
+            return
+        await self.morning_reset()
+        if self.halted or self.dry_run:
+            await self.log("INFO", "ETF_REBALANCE_SKIPPED",
+                           "halted" if self.halted else "dry run")
+            return
+        account = await self.orders.api.get_account()
+        equity = float(account.get("equity", 0) or 0)
+        if equity <= 0:
+            await self.log("ERROR", "ETF_REBALANCE_SKIPPED",
+                           "could not read account equity")
+            return
+        summary = await self.sleeves.etf.rebalance(equity, execute=True)
+        await self.log(
+            "INFO", "ETF_REBALANCE",
+            f"{len(summary.get('fills', []))} fill(s), "
+            f"{len(summary.get('unfilled', []))} unfilled, "
+            f"{summary.get('orders_planned', 0)} planned", summary)
 
     async def mark_shadows(self) -> None:
         """Mark every open shadow variant on one schedule.
@@ -590,6 +715,35 @@ class TradingSession:
                        f"${report['cost_usd']:.4f} spend",
                        {"report": report, "performance": performance,
                         "budget": self.budget.summary()})
+
+        # Sleeve bookkeeping: nightly per-symbol snapshots so the sleeve
+        # P&L series exists for the reviews, plus the isolation numbers in
+        # the log. Measurement only; fenced.
+        if self.sleeves is not None and getattr(self.sleeves, "enabled",
+                                                False):
+            try:
+                written = await self.sleeves.snapshot_all()
+                acct = await self.sleeves.accounting()
+                await self.log(
+                    "INFO", "SLEEVE_SNAPSHOT",
+                    f"{written} row(s); sleeve MV "
+                    f"${acct.sleeve_market_value:,.0f}, invested "
+                    f"${acct.net_invested:,.0f}, P&L "
+                    f"${acct.sleeve_pnl_total:,.0f}",
+                    {"open_stock_positions": len(self.sleeves.stock.tracked)})
+            except Exception as exc:  # noqa: BLE001
+                await self.log("WARN", "SLEEVE_SNAPSHOT_FAILED",
+                               str(exc)[:200])
+
+        # Rhetoric audits (idea #4, reporting-only): grade today's PM
+        # citations and exit claims; findings land in rhetoric_audits.
+        try:
+            audit_summary = await rhetoric.run_nightly(self.db, self.config)
+            if audit_summary.get("claims") or audit_summary.get("exits"):
+                await self.log("INFO", "RHETORIC_AUDIT_DONE",
+                               json.dumps(audit_summary, default=str)[:300])
+        except Exception as exc:  # noqa: BLE001
+            await self.log("WARN", "RHETORIC_AUDIT_FAILED", str(exc)[:200])
 
         # Idea #5 nightly discipline: Brier-score every prior whose expiry
         # passed, and on/after the cohort review date write the one-shot
@@ -728,6 +882,33 @@ class TradingSession:
             return None
         day_start = float(account.get("last_equity", equity) or equity)
 
+        # Sleeve isolation (2026-10-30): the Constitution sizes and halts
+        # against the OPTIONS DESK'S capital, not the whole account. At
+        # 60% beta exposure an ordinary red market day would otherwise
+        # trip drawdown halts the options book did nothing to earn.
+        #   options_nav = account_equity - (sleeve_mv - sleeve_invested)
+        # With no sleeve activity the adjustment is exactly zero, and a
+        # failed accounting read degrades to whole-account equity (the
+        # pre-sleeve behavior) rather than aborting the scan. Same-day
+        # REALIZED sleeve P&L is not in the intraday split; the error is
+        # bounded by that day's sleeve sells and heals at the session
+        # boundary (see sleeves/accounting.py).
+        self._account_equity = equity
+        self._sleeve_pnl_total = 0.0
+        if self.sleeves is not None and getattr(self.sleeves, "enabled",
+                                                False):
+            try:
+                acct = await self.sleeves.accounting()
+                self._sleeve_pnl_total = acct.sleeve_pnl_total
+                equity = equity - acct.sleeve_pnl_total
+                day_start = day_start - (acct.sleeve_pnl_total
+                                         - acct.intraday_pl)
+            except Exception as exc:  # noqa: BLE001 - degrade, never abort
+                await self.log("WARN", "SLEEVE_ACCOUNTING_FAILED",
+                               str(exc)[:200])
+        if equity <= 0 or day_start <= 0:
+            return None
+
         peak = await self.db.get_state("peak_equity", default=equity)
         peak = max(float(peak or equity), equity)
         await self.db.set_state("peak_equity", peak)
@@ -757,15 +938,22 @@ class TradingSession:
             open_position_count=len(open_rows),
             open_decision_ids={r["decision_id"] for r in open_rows})
 
-    @staticmethod
-    def _portfolio_summary(state: PortfolioState) -> dict[str, Any]:
-        return {
+    def _portfolio_summary(self, state: PortfolioState) -> dict[str, Any]:
+        out = {
             "equity": round(state.equity, 2),
             "open_positions": state.open_position_count,
             "open_risk_pct": round(
                 state.open_risk_dollars / state.equity * 100, 3),
             "daily_drawdown_pct": round(state.daily_drawdown_pct, 3),
         }
+        if abs(self._account_equity - state.equity) > 0.01:
+            out["equity_note"] = (
+                "equity above is the OPTIONS DESK's own NAV; the account "
+                "also runs ETF and stock sleeves whose P&L is excluded "
+                "from it by design")
+            out["account_equity"] = round(self._account_equity, 2)
+            out["sleeve_pnl_total"] = round(self._sleeve_pnl_total, 2)
+        return out
 
 
 # ======================================================================
@@ -814,6 +1002,13 @@ def build_scheduler(session: TradingSession,
     if competition_flatten_at(getattr(session, "risk_config", None)) is not None:
         add(session.competition_flatten, cron(config.flatten_time), "flatten")
     add(session.post_close, cron(config.lessons_time), "post_close")
+
+    sleeves = getattr(session, "sleeves", None)
+    if sleeves is not None and getattr(sleeves, "enabled", False) \
+            and sleeves.etf.enabled:
+        etf_time = (session.config.get("sleeves", {}).get("etf", {})
+                    .get("rebalance_time_et", "10:05"))
+        add(session.etf_rebalance, cron(etf_time), "etf_rebalance")
 
     return scheduler
 

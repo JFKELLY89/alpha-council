@@ -831,6 +831,91 @@ CREATE TABLE IF NOT EXISTS prior_scores (
 );
 
 -- ----------------------------------------------------------------------
+-- capital sleeves (operator rebalance, 2026-10-30)
+-- Definitions mirror alpha_council/sleeves/accounting.py SLEEVES_DDL,
+-- applied idempotently at startup for pre-existing databases.
+-- ----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS sleeve_orders (
+    order_pk        TEXT PRIMARY KEY,
+    sleeve          TEXT NOT NULL CHECK(sleeve IN ('ETF','STOCK')),
+    decision_id     TEXT,
+    client_order_id TEXT NOT NULL UNIQUE,
+    alpaca_order_id TEXT,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL CHECK(side IN ('buy','sell')),
+    qty             REAL NOT NULL,
+    limit_price     REAL NOT NULL,
+    status          TEXT NOT NULL,
+    filled_qty      REAL NOT NULL DEFAULT 0,
+    fill_price      REAL,
+    notional        REAL,
+    reason          TEXT NOT NULL DEFAULT '',
+    submitted_at    TEXT,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sleeve_orders_sleeve
+    ON sleeve_orders(sleeve, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS sleeve_snapshots (
+    snapshot_id  TEXT PRIMARY KEY,
+    as_of        TEXT NOT NULL,
+    sleeve       TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    qty          REAL NOT NULL,
+    price        REAL,
+    market_value REAL NOT NULL,
+    target_value REAL,
+    raw_json     TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sleeve_snapshots
+    ON sleeve_snapshots(sleeve, as_of DESC);
+
+CREATE TABLE IF NOT EXISTS sleeve_trades (
+    trade_id          TEXT PRIMARY KEY,
+    decision_id       TEXT UNIQUE,
+    symbol            TEXT NOT NULL,
+    qty               INTEGER NOT NULL,
+    entry_price       REAL NOT NULL,
+    stop_price        REAL NOT NULL,
+    target_price      REAL,
+    horizon_days      INTEGER NOT NULL,
+    opened_at         TEXT NOT NULL,
+    closed_at         TEXT,
+    status            TEXT NOT NULL CHECK(status IN ('OPEN','CLOSED')),
+    exit_reason       TEXT,
+    exit_price        REAL,
+    realized_pnl      REAL,
+    thesis            TEXT NOT NULL DEFAULT '',
+    invalidation_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_sleeve_trades_status
+    ON sleeve_trades(status, opened_at DESC);
+
+-- ----------------------------------------------------------------------
+-- rhetoric audits (hackathon review idea #4, 2026-10-30) - reporting
+-- only. Mirrors alpha_council/audit/rhetoric.py RHETORIC_DDL.
+-- ----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS rhetoric_audits (
+    audit_id     TEXT PRIMARY KEY,
+    decision_id  TEXT NOT NULL,
+    audited_at   TEXT NOT NULL,
+    audit_type   TEXT NOT NULL
+        CHECK(audit_type IN ('INVALIDATION_CITE','EXIT_CLAIM')),
+    subject      TEXT NOT NULL,
+    claim_value  REAL,
+    grade        TEXT NOT NULL CHECK(grade IN (
+        'SUPPORTED','DERIVED','UNSUPPORTED',
+        'CONSISTENT','INCONSISTENT','NOT_CHECKABLE')),
+    detail       TEXT NOT NULL,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(decision_id, audit_type, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_rhetoric_grade
+    ON rhetoric_audits(grade, audited_at DESC);
+
+-- ----------------------------------------------------------------------
 -- observability
 -- ----------------------------------------------------------------------
 
