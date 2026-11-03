@@ -350,7 +350,13 @@ class AnthropicClient(LLMClient):
         if self._client is None:
             from anthropic import AsyncAnthropic
 
-            self._client = AsyncAnthropic(api_key=self.api_key, timeout=90.0,
+            # Red-team reviews on sonnet-5 average ~6.8k output tokens,
+            # ~80-90s of generation (measured 2026-11-02), so a 90s
+            # timeout sat inside the normal latency range and executed
+            # the slow tail: 5/18 reviews died. 240s clears the
+            # distribution while a stalled request still fails well
+            # inside the 45-minute scan cadence.
+            self._client = AsyncAnthropic(api_key=self.api_key, timeout=240.0,
                                           max_retries=1)
         return self._client
 

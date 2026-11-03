@@ -221,19 +221,29 @@ class StockSleeve:
         current_mv = await self.current_notional()
         headroom = self.target_pct / 100.0 * equity - current_mv
 
+        councils = 0
+        skipped_held = 0
+        skipped_direction = 0
+        stopped = "exhausted"  # looked at every candidate offered
         for candidate in candidates:
             if opened >= self.councils_per_scan:
+                stopped = "councils_per_scan"
                 break
             if len(self.tracked) >= self.max_positions:
+                stopped = "max_positions"
                 break
             if headroom < 500.0:
+                stopped = "headroom"
                 break
             symbol = candidate.symbol.upper()
             if symbol in self.excluded or symbol in self.held_symbols():
+                skipped_held += 1
                 continue
             if self.long_only and candidate.direction is not Direction.BULLISH:
+                skipped_direction += 1
                 continue
 
+            councils += 1
             builder = await builder_factory(candidate)
             filled_notional = await self._equity_council(
                 candidate, candidate_ids.get(candidate.symbol, ""),
@@ -242,6 +252,16 @@ class StockSleeve:
             if filled_notional:
                 opened += 1
                 headroom -= filled_notional
+
+        # One line per scan, even (especially) when nothing opened: an
+        # all-decline pass is otherwise indistinguishable from dead wiring.
+        await self.db.log_event(
+            "INFO", "stock_sleeve", "STOCK_SLEEVE_SCAN",
+            f"offered {len(candidates)}: {skipped_direction} non-bullish, "
+            f"{skipped_held} excluded/held, {councils} council(s), "
+            f"{opened} opened ({stopped})",
+            {"headroom_left": round(headroom, 2),
+             "sizing_equity": round(equity, 2)})
         return opened
 
     async def _equity_council(self, candidate: CandidateFeatures,
