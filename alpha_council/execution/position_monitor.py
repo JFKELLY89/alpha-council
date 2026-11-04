@@ -205,12 +205,17 @@ def check_invalidation(rules: Sequence[InvalidationRule], underlying: float,
     to the PM's reference level when no session VWAP is available. (It
     used to compare the session VWAP to the PM's snapshot of it, which
     fired the moment the two drifted a tick apart - DRAM, 2026-09-04,
-    closed 19 seconds after entry.) A breach must hold for a confirmation
-    window before it fires: the minutes the PM wrote into the rule ("for
-    30 consecutive minutes"), else ``default_confirm_minutes`` for VWAP
-    rules and immediately for PRICE and TIME rules. ``breach_since``
-    carries first-breach times between polls; a poll without a breach
-    resets the rule's clock.
+    closed 19 seconds after entry.) The live VWAP governs only during the
+    ENTRY session: each later session recomputes VWAP from fresh bars,
+    which can sit dollars from the level the PM was watching (INTC,
+    2026-11-03: exited against a 61.76 day-2 VWAP while the recorded
+    invalidation level was 63.75), so overnight the rule hardens into a
+    PRICE rule at the recorded threshold. A breach must hold for a
+    confirmation window before it fires: the minutes the PM wrote into
+    the rule ("for 30 consecutive minutes"), else
+    ``default_confirm_minutes`` for VWAP rules and immediately for PRICE
+    and TIME rules. ``breach_since`` carries first-breach times between
+    polls; a poll without a breach resets the rule's clock.
     """
     state = breach_since if breach_since is not None else {}
     for index, rule in enumerate(rules):
@@ -222,7 +227,9 @@ def check_invalidation(rules: Sequence[InvalidationRule], underlying: float,
             confirm = _confirm_minutes(rule.description, 0.0)
         elif rule.rule_type == "VWAP":
             observed = underlying
-            reference = vwap if vwap is not None else rule.threshold
+            same_session = to_et(now).date() == to_et(opened_at).date()
+            reference = (vwap if vwap is not None and same_session
+                         else rule.threshold)
             confirm = _confirm_minutes(rule.description,
                                        default_confirm_minutes)
         elif rule.rule_type == "TIME":

@@ -467,6 +467,15 @@ class TradingSession:
                 if outcome.traded:
                     self.summary.trades_opened += 1
                     allowed, reason = self.can_open()
+                    # A fill invalidates the scan-start snapshot: later
+                    # councils in the same scan must see the new position
+                    # in every count and dollar cap (2026-11-03: three
+                    # same-scan fills ran the book to 7 open against the
+                    # max of 5). A failed re-read keeps the stale state -
+                    # degrade, never abort the scan.
+                    refreshed = await self._portfolio_state()
+                    if refreshed is not None:
+                        portfolio = refreshed
 
             # Stock sleeve (2026-10-30): finalists the options seats never
             # reached can still carry a thesis as LONG SHARES. Same

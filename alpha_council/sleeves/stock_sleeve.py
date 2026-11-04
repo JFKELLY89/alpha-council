@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Sequence
 
 from alpha_council.agents.council import MIN_ANALYSTS, Council, CouncilOutcome
@@ -224,6 +224,7 @@ class StockSleeve:
         councils = 0
         skipped_held = 0
         skipped_direction = 0
+        skipped_cooldown = 0
         stopped = "exhausted"  # looked at every candidate offered
         for candidate in candidates:
             if opened >= self.councils_per_scan:
@@ -242,6 +243,13 @@ class StockSleeve:
             if self.long_only and candidate.direction is not Direction.BULLISH:
                 skipped_direction += 1
                 continue
+            if await self._abstained_recently(candidate):
+                skipped_cooldown += 1
+                await self.db.log_event(
+                    "INFO", "stock_sleeve", "STOCK_SKIP_RECENT_ABSTAIN",
+                    f"{symbol}: PM abstained within the cooldown on "
+                    "materially unchanged evidence; no new council")
+                continue
 
             councils += 1
             builder = await builder_factory(candidate)
@@ -258,11 +266,41 @@ class StockSleeve:
         await self.db.log_event(
             "INFO", "stock_sleeve", "STOCK_SLEEVE_SCAN",
             f"offered {len(candidates)}: {skipped_direction} non-bullish, "
-            f"{skipped_held} excluded/held, {councils} council(s), "
-            f"{opened} opened ({stopped})",
+            f"{skipped_held} excluded/held, {skipped_cooldown} cooldown, "
+            f"{councils} council(s), {opened} opened ({stopped})",
             {"headroom_left": round(headroom, 2),
              "sizing_equity": round(equity, 2)})
         return opened
+
+    async def _abstained_recently(self, candidate: CandidateFeatures) -> bool:
+        """The options seat allocator's abstain cooldown, applied here.
+
+        A PM abstain on the symbol within the cooldown window does not
+        earn another council unless the candidate's score has moved by
+        the rescore delta - without this the sleeve re-hears the same
+        leftover every scan (CIFR: five identical abstentions,
+        2026-11-03, the PM itself citing "no material change").
+        """
+        cs = self.config.get("council_seats", {})
+        cooldown_h = float(cs.get("abstain_cooldown_hours", 2.0))
+        rescore = float(cs.get("abstain_rescore_delta", 4.0))
+        if cooldown_h <= 0:
+            return False
+        cutoff = (utc_now() - timedelta(hours=cooldown_h)).isoformat()
+        recent = await self.db.fetchone(
+            "SELECT s.final_opportunity_score AS score "
+            "FROM trade_proposals p "
+            "JOIN decisions d ON d.decision_id = p.decision_id "
+            "LEFT JOIN candidate_scores s ON s.candidate_id = d.candidate_id "
+            "WHERE d.symbol = ? AND p.trade = 0 AND p.created_at >= ? "
+            "ORDER BY p.created_at DESC LIMIT 1",
+            (candidate.symbol, cutoff))
+        if recent is None:
+            return False
+        then = recent.get("score")
+        return (then is not None
+                and abs(candidate.final_opportunity_score - float(then))
+                < rescore)
 
     async def _equity_council(self, candidate: CandidateFeatures,
                               candidate_id: str, builder: Any,

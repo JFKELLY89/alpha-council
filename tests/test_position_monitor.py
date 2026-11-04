@@ -268,6 +268,21 @@ def test_vwap_rule_compares_the_underlying_to_the_vwap():
     assert check_invalidation(rules, 202.0, None, NOW, NOW) is not None
 
 
+def test_vwap_rule_hardens_to_the_recorded_threshold_overnight():
+    """INTC 2026-11-03: the day-2 session VWAP printed 61.76 while the
+    PM's recorded invalidation level was 63.75, and the live-VWAP
+    reference exited a working position $1.85 below the PM's level."""
+    rules = [InvalidationRule(rule_type="VWAP", description="reclaims vwap",
+                              threshold=63.75, comparator="GT")]
+    opened = NOW - timedelta(days=1)
+    # above the day-2 live VWAP but below the recorded level: no breach
+    assert check_invalidation(rules, 61.90, 61.76, opened, NOW) is None
+    # above the recorded level on a later session: breach
+    assert check_invalidation(rules, 63.80, 61.76, opened, NOW) is not None
+    # during the entry session the live VWAP still governs
+    assert check_invalidation(rules, 61.90, 61.76, NOW, NOW) is not None
+
+
 DRAM_RULE = InvalidationRule(
     rule_type="VWAP", comparator="LT", threshold=57.7984,
     description="Exit if DRAM remains below the 57.7984 VWAP reference "
