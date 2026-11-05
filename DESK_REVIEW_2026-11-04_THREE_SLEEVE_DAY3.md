@@ -129,6 +129,19 @@ blinds invalidation/target monitoring for its duration (the error path, as Nov-5
 proved, degrades gracefully — the hang path does not). Market hours have been
 unaffected on both days — verified zero snapshot gaps > 6 min inside RTH.
 
+> **Correction (2026-11-05, during the F11 fix):** Windows Kernel-Power events
+> show the 11-04 "hang" was the machine itself, not Alpaca: Modern Standby from
+> 21:52 ET, a battery-triggered full sleep at 03:51:23, and a lid-open wake at
+> 06:01:37 — the desk's last snapshot tick (03:49) and first resumed tick
+> (06:01:35) bracket the suspend exactly. The REST data path already carried a
+> 30s httpx timeout; nothing in it can hang unbounded. F11 as applied
+> (`ae49a1d`, `b0fb394`): deadlines on the MCP stdio transport, which truly had
+> none (30s per call, 120s startup after a 60s budget fired on a cold uvx
+> resolution at the first live start, 10s shutdown), plus a MONITOR_GAP warning
+> whenever polling resumes after a blind window, so a suspend is visible in the
+> event log instead of silent. Keeping the laptop plugged in or set not to
+> sleep on battery overnight is an operator decision outside the codebase.
+
 ## Findings
 
 | # | Sev | Finding | Recommendation |
