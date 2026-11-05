@@ -22,6 +22,7 @@ from alpha_council.execution.position_monitor import (
     MonitoredPosition,
     check_invalidation,
     evaluate_exit,
+    monitor_gap_warning,
 )
 from alpha_council.models.enums import (
     DataConfidence,
@@ -51,6 +52,19 @@ RISK_CFG = {
         "never_require_llm_to_exit": True,
     }
 }
+
+
+def test_monitor_gap_warns_after_a_blind_window():
+    # 2026-11-04: a battery sleep hid 132 minutes from the poll loop.
+    note = monitor_gap_warning(NOW - timedelta(minutes=132), NOW, 10.0)
+    assert note is not None
+    assert "132" in note
+
+
+def test_monitor_gap_quiet_on_cadence_first_poll_and_disable():
+    assert monitor_gap_warning(NOW - timedelta(minutes=2), NOW, 10.0) is None
+    assert monitor_gap_warning(None, NOW, 10.0) is None
+    assert monitor_gap_warning(NOW - timedelta(minutes=60), NOW, 0.0) is None
 
 
 def _leg(strike: float, delta: float, option_type: str = "CALL",

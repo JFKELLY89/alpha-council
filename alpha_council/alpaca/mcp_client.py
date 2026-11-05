@@ -27,6 +27,7 @@ Place at: alpha_council/alpaca/mcp_client.py
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import AsyncExitStack
@@ -61,6 +62,13 @@ TOOL_ALIASES: dict[str, tuple[str, ...]] = {
 
 # Without these the control plane is not meaningfully using MCP.
 REQUIRED_LOGICAL_TOOLS = ("account", "clock", "positions")
+
+# F11 (2026-11-05): the stdio transport has no deadline of its own, so a
+# wedged server - or a pipe that died across a machine suspend - left
+# callers hung forever. A deadline turns that into the designed degrade
+# paths: WARN + REST fallback per call, REST-only mode at startup.
+MCP_CALL_TIMEOUT_S = 30.0
+MCP_START_TIMEOUT_S = 60.0
 
 
 @dataclass(slots=True)
@@ -143,8 +151,7 @@ class AlpacaMCPClient:
                                 "options-data,news"),
         }
 
-        try:
-            self._stack = AsyncExitStack()
+        async def _start() -> None:
             params = StdioServerParameters(command=self.command,
                                            args=self.args, env=env)
             read, write = await self._stack.enter_async_context(
@@ -152,6 +159,16 @@ class AlpacaMCPClient:
             self._session = await self._stack.enter_async_context(
                 ClientSession(read, write))
             await self._session.initialize()
+
+        try:
+            self._stack = AsyncExitStack()
+            await asyncio.wait_for(_start(), timeout=MCP_START_TIMEOUT_S)
+        except TimeoutError:
+            self.start_error = (f"startup timed out after "
+                                f"{MCP_START_TIMEOUT_S:.0f}s")
+            await self._log("ERROR", "MCP_START_FAILED", self.start_error)
+            await self.close()
+            return False
         except Exception as exc:  # noqa: BLE001
             self.start_error = f"{type(exc).__name__}: {exc}"[:300]
             await self._log("ERROR", "MCP_START_FAILED", self.start_error)
@@ -169,7 +186,8 @@ class AlpacaMCPClient:
         system genuinely spoke to the MCP server.
         """
         try:
-            listing = await self._session.list_tools()
+            listing = await asyncio.wait_for(self._session.list_tools(),
+                                             timeout=MCP_CALL_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001
             self.start_error = f"list_tools failed: {exc}"[:300]
             await self._log("ERROR", "MCP_LIST_TOOLS_FAILED",
@@ -202,7 +220,7 @@ class AlpacaMCPClient:
     async def close(self) -> None:
         if self._stack is not None:
             try:
-                await self._stack.aclose()
+                await asyncio.wait_for(self._stack.aclose(), timeout=10.0)
             except Exception:  # noqa: BLE001
                 pass
         self._stack = None
@@ -228,7 +246,13 @@ class AlpacaMCPClient:
             raise RuntimeError(f"MCP tool unavailable: {logical}")
 
         name = self.resolved[logical]
-        result = await self._session.call_tool(name, arguments or {})
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool(name, arguments or {}),
+                timeout=MCP_CALL_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise RuntimeError(f"MCP tool {name} timed out after "
+                               f"{MCP_CALL_TIMEOUT_S:.0f}s") from exc
         self.stats.note_mcp(name)
 
         if getattr(result, "isError", False):

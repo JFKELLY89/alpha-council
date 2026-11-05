@@ -277,6 +277,24 @@ def _comparator_fires(observed: float, comparator: str,
     }.get(comparator, False)
 
 
+def monitor_gap_warning(last_poll_at: datetime | None, now: datetime,
+                        warn_minutes: float) -> str | None:
+    """A poll loop that was silent for a long stretch must say so.
+
+    The 2-minute cadence only holds while the process runs and the host
+    is awake; a machine suspend (2026-11-04: battery sleep, 03:51-06:01
+    ET) stops it with no error anywhere. The gap itself is the only
+    observable fact, so it is measured and reported when polling resumes.
+    """
+    if last_poll_at is None or warn_minutes <= 0:
+        return None
+    gap = (now - last_poll_at).total_seconds() / 60.0
+    if gap < warn_minutes:
+        return None
+    return (f"no poll for {gap:.0f} minutes (host suspend or upstream "
+            f"stall): positions were unmonitored; exits re-evaluate now")
+
+
 class PositionMonitor:
     """Polls open positions and exits them on deterministic rules."""
 
@@ -300,6 +318,8 @@ class PositionMonitor:
         # Decisions whose exit is waiting for the options market to open,
         # so the wait is logged once instead of every 2-minute poll.
         self._exit_awaiting_rth: set[str] = set()
+        # Wall clock of the previous poll, for gap detection on resume.
+        self._last_poll_at: datetime | None = None
 
     def track(self, position: MonitoredPosition) -> None:
         self._positions[position.decision_id] = position
@@ -382,9 +402,19 @@ class PositionMonitor:
                    execute: bool = True) -> list[tuple[str, ExitDecision]]:
         """One monitoring cycle. Returns every exit decision made."""
         now = now or utc_now()
+        last_poll = self._last_poll_at
+        self._last_poll_at = now
         decisions: list[tuple[str, ExitDecision]] = []
         if not self._positions:
             return decisions
+
+        gap_note = monitor_gap_warning(
+            last_poll, now,
+            float(self.risk_config.get("exits", {})
+                  .get("monitor_gap_warn_minutes", 10.0)))
+        if gap_note:
+            await self.db.log_event("WARN", "position_monitor",
+                                    "MONITOR_GAP", gap_note)
 
         symbols = sorted({p.symbol for p in self._positions.values()})
         snapshots = await self.market.snapshots(symbols)

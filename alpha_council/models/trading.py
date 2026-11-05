@@ -10,6 +10,7 @@ Place at: alpha_council/models/trading.py
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Literal
 
@@ -36,6 +37,87 @@ class InvalidationRule(StrictModel):
         if self.threshold is not None and self.comparator is None:
             raise ValueError("threshold requires a comparator")
         return self
+
+
+# The system-wide holding ceiling (PortfolioProposal horizon le=15).
+MAX_HORIZON_DAYS = 15
+
+_DAY_WORDS = {
+    "one": 1, "first": 1, "two": 2, "second": 2, "three": 3, "third": 3,
+    "four": 4, "fourth": 4, "five": 5, "fifth": 5, "six": 6, "sixth": 6,
+    "seven": 7, "seventh": 7, "eight": 8, "eighth": 8, "nine": 9,
+    "ninth": 9, "ten": 10, "tenth": 10, "eleven": 11, "eleventh": 11,
+    "twelve": 12, "twelfth": 12, "thirteen": 13, "thirteenth": 13,
+    "fourteen": 14, "fourteenth": 14, "fifteen": 15, "fifteenth": 15,
+}
+
+_DAY_COUNT = re.compile(
+    r"\b(\d{1,2}|" + "|".join(sorted(_DAY_WORDS, key=len, reverse=True))
+    + r")\b(?:\s+(?:full|more|consecutive))*\s+(?:trading\s+)?"
+    r"(?:day|session)s?\b", re.IGNORECASE)
+
+
+def _parse_day_count(text: str) -> int | None:
+    match = _DAY_COUNT.search(text or "")
+    if not match:
+        return None
+    token = match.group(1).lower()
+    value = _DAY_WORDS.get(token)
+    if value is None:
+        try:
+            value = int(token)
+        except ValueError:
+            return None
+    return value if 1 <= value <= MAX_HORIZON_DAYS else None
+
+
+def normalize_invalidation_rules(
+        rules: list[InvalidationRule],
+        horizon_days: int) -> tuple[list[InvalidationRule], list[str]]:
+    """Make TIME rules evaluable before they are persisted.
+
+    The monitor measures a TIME rule as elapsed days against its
+    threshold and skips any rule whose threshold is None, so a malformed
+    threshold is a silently dead backstop. PMs occasionally put a price
+    level in the slot (MSFT, 2026-11-04: threshold 558.0 on "exit at the
+    end of the fifth trading day...", graded UNSUPPORTED by the audit as
+    beyond the 15-day system maximum, and never evaluable). The day
+    count is recovered from the rule's own wording, else from the PM's
+    stated horizon, and the comparator is forced to GTE - a time stop
+    that fires while elapsed time is BELOW its bound would close the
+    position at the first poll. Every repair is reported so the operator
+    sees it; other rule types pass through untouched.
+    """
+    fixed: list[InvalidationRule] = []
+    notes: list[str] = []
+    for index, rule in enumerate(rules or []):
+        if rule.rule_type != "TIME":
+            fixed.append(rule)
+            continue
+        threshold = rule.threshold
+        sane = (threshold is not None
+                and 1.0 <= threshold <= MAX_HORIZON_DAYS)
+        if sane and rule.comparator in ("GT", "GTE"):
+            fixed.append(rule)
+            continue
+        if sane:
+            new_threshold = float(threshold)
+            source = "kept the day count"
+        else:
+            parsed = _parse_day_count(rule.description)
+            if parsed is not None:
+                new_threshold = float(parsed)
+                source = "parsed from the rule text"
+            else:
+                new_threshold = float(
+                    min(max(int(horizon_days), 1), MAX_HORIZON_DAYS))
+                source = "defaulted to the PM horizon"
+        fixed.append(rule.model_copy(update={"threshold": new_threshold,
+                                             "comparator": "GTE"}))
+        notes.append(
+            f"TIME rule {index}: {threshold} {rule.comparator or '-'} -> "
+            f"{new_threshold:g} GTE ({source}): {rule.description[:60]}")
+    return fixed, notes
 
 
 class PortfolioProposal(StrictModel):

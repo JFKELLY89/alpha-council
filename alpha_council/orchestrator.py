@@ -48,7 +48,8 @@ from alpha_council.models.enums import (
     ShadowVariant,
     Verdict,
 )
-from alpha_council.models.trading import OptionStructure
+from alpha_council.models.trading import (OptionStructure,
+                                          normalize_invalidation_rules)
 from alpha_council.risk.constitution import (
     PortfolioState,
     RiskConstitution,
@@ -470,14 +471,26 @@ class Orchestrator:
         outcome.fill_debit = execution.fill_debit
         await self.journal.transition(decision_id, DecisionState.FILLED)
 
+        # F13 (2026-11-05): repaired TIME rules reach the journal and the
+        # live monitor; the raw PM wording stays on trade_proposals for
+        # the audit.
+        rules, rule_notes = normalize_invalidation_rules(
+            council.final_proposal.invalidation
+            if council.final_proposal else [],
+            council.final_proposal.expected_horizon_days
+            if council.final_proposal else 5)
+        if rule_notes:
+            await self.db.log_event(
+                "WARN", "orchestrator", "RULE_NORMALIZED",
+                f"{candidate.symbol}: " + "; ".join(rule_notes),
+                decision_id=decision_id)
+
         await self.journal.open_trade(
             decision_id, candidate.symbol, evaluation.approved_qty,
             execution.fill_debit,
             thesis=(council.final_proposal.thesis
                     if council.final_proposal else ""),
-            invalidation=[r.model_dump() for r in
-                          (council.final_proposal.invalidation
-                           if council.final_proposal else [])],
+            invalidation=[r.model_dump() for r in rules],
             track=candidate.track, opened_at=execution.filled_at or now)
 
         await self.shadows.create(
@@ -490,8 +503,7 @@ class Orchestrator:
             structure=selected, qty=evaluation.approved_qty,
             entry_debit=execution.fill_debit,
             opened_at=execution.filled_at or now,
-            invalidation=list(council.final_proposal.invalidation)
-            if council.final_proposal else [],
+            invalidation=list(rules),
             horizon_days=(council.final_proposal.expected_horizon_days
                           if council.final_proposal else 5),
             track=candidate.track))
