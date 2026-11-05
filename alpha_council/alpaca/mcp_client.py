@@ -68,7 +68,10 @@ REQUIRED_LOGICAL_TOOLS = ("account", "clock", "positions")
 # callers hung forever. A deadline turns that into the designed degrade
 # paths: WARN + REST fallback per call, REST-only mode at startup.
 MCP_CALL_TIMEOUT_S = 30.0
-MCP_START_TIMEOUT_S = 60.0
+# Startup covers a uvx dependency resolution, which on a cold or
+# invalidated cache exceeded 60s on the first live start (2026-11-05);
+# the server itself initializes in ~2s once the environment exists.
+MCP_START_TIMEOUT_S = 120.0
 
 
 @dataclass(slots=True)
