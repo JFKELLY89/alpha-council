@@ -195,7 +195,7 @@ priors:
   enabled: true
   etf_cohort: [SPY, QQQ, IWM, DIA, VOO, VUG, SCHD, GLD, TLT]
   cohort_added: "2026-10-30"
-  cohort_review_date: "2026-11-20"   # one-shot operator review, run-once
+  cohort_review_date: "2026-12-04"   # one-shot operator review, run-once (pushed +2w on 2026-11-21: Nov 6-21 outage left the window short of data)
   horizon_days: 7                    # matches the median holding period
   refresh_minutes: 90                # per-symbol compute gate across scans
   strike_band_pct: 0.08              # contracts fetched within +/-8% of spot

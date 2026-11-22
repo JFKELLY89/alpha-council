@@ -320,6 +320,9 @@ class PositionMonitor:
         self._exit_awaiting_rth: set[str] = set()
         # Wall clock of the previous poll, for gap detection on resume.
         self._last_poll_at: datetime | None = None
+        # Positions whose stale-quote skip was already logged this
+        # episode, so a long feed stall warns once per position.
+        self._stale_quote_logged: set[str] = set()
 
     def track(self, position: MonitoredPosition) -> None:
         self._positions[position.decision_id] = position
@@ -404,6 +407,12 @@ class PositionMonitor:
         now = now or utc_now()
         last_poll = self._last_poll_at
         self._last_poll_at = now
+        # The launcher's liveness guard (F15) reads DB-file freshness, so
+        # every poll must leave a mark even with an empty book.
+        try:
+            await self.db.set_state("monitor_heartbeat", now)
+        except Exception:  # noqa: BLE001 - liveness must never stop polling
+            pass
         decisions: list[tuple[str, ExitDecision]] = []
         if not self._positions:
             return decisions
@@ -436,6 +445,23 @@ class PositionMonitor:
                 continue
 
             confidence = self._equity_confidence(snap.quote_age)
+            if confidence is DataConfidence.BLOCKED:
+                # F16 (2026-11-21): a quote beyond the BLOCKED age bound is
+                # not evidence. Post-resume snapshots served prices the
+                # day's bars never printed, and six exits fired on them
+                # over 11-06..17. Nothing is evaluated on stale data; the
+                # position stays managed on the next fresh tick.
+                if position.decision_id not in self._stale_quote_logged:
+                    self._stale_quote_logged.add(position.decision_id)
+                    age = ("?" if snap.quote_age is None
+                           else f"{snap.quote_age:.0f}")
+                    await self.db.log_event(
+                        "WARN", "position_monitor", "UNDERLYING_QUOTE_STALE",
+                        f"{position.symbol}: quote age {age}s exceeds the "
+                        "evaluation bound; exits not evaluated this poll",
+                        decision_id=position.decision_id)
+                continue
+            self._stale_quote_logged.discard(position.decision_id)
             vwap = await self._session_vwap(position.symbol)
 
             # Advisory option triggers (§18 secondary). The mark source

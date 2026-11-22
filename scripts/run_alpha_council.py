@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -104,9 +106,34 @@ def rule(title: str) -> None:
     say("=" * 74)
 
 
+STARTUP_WATCHDOG_MINUTES = 10.0
+
+
+def arm_startup_watchdog(minutes: float = STARTUP_WATCHDOG_MINUTES,
+                         _exit=os._exit) -> threading.Timer:
+    """F14 (2026-11-21): a launch that never reaches SESSION_STARTED is a
+    zombie - alive enough to satisfy the launcher's duplicate guard, dead
+    enough to do nothing, invisible until an operator looks (11-17: four
+    days). A daemon-thread timer cannot be blocked by a wedged event loop;
+    it hard-exits so the next scheduled launch finds a dead process and
+    starts fresh. Cancelled the moment SESSION_STARTED is logged.
+    """
+    def _fire() -> None:
+        print(f"STARTUP_TIMEOUT: SESSION_STARTED not reached within "
+              f"{minutes:.0f} minutes; exiting so the launcher can retry",
+              file=sys.stderr, flush=True)
+        _exit(1)
+
+    timer = threading.Timer(minutes * 60.0, _fire)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 async def run(args: argparse.Namespace) -> int:
     settings = get_settings()
     settings.assert_paper_only()          # before anything touches the network
+    watchdog = arm_startup_watchdog()
 
     scoring = load_yaml("scoring")
     risk_cfg = load_yaml("risk_constitution")
@@ -349,6 +376,7 @@ async def run(args: argparse.Namespace) -> int:
             f"dry_run={args.dry_run} max_trades={args.max_trades}",
             {"config_version": config_version, "tier": tiers.tier,
              "restored_positions": restored})
+        watchdog.cancel()
 
         # ---- one-shot mode --------------------------------------------
         if args.scan_now:

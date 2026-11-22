@@ -28,7 +28,7 @@ from typing import Any
 from alpha_council.db.engine import Database
 from alpha_council.sleeves.accounting import equity_positions, record_snapshots
 from alpha_council.sleeves.equity_exec import submit_marketable
-from alpha_council.utils.time import utc_now
+from alpha_council.utils.time import iso_utc, utc_now
 
 
 @dataclass(slots=True)
@@ -206,6 +206,24 @@ class ETFSleeve:
                 "market_value": h.get("market_value", 0.0),
                 "target_value": None,
             })
+        # F17 (2026-11-21): a mixed snapshot - some legs held, some zero -
+        # is the signature of a partial broker read, not a real book (an
+        # mv-5,088 row sat beside full 27,6xx snapshots over 11-09..11).
+        # The series is for attribution; a corrupt point is worse than a
+        # missing one. One record per sleeve per UTC day, so a re-run
+        # after a skip can still fill in, but never double-writes.
+        held = [r for r in rows if r["qty"] > 0]
+        if held and len(held) < len(self.symbols):
+            await self.db.log_event(
+                "WARN", "etf_sleeve", "SLEEVE_SNAPSHOT_SKIPPED",
+                f"partial holdings read ({len(held)}/{len(self.symbols)} "
+                "legs); snapshot not persisted")
+            return 0
+        exists = await self.db.fetchone(
+            "SELECT 1 FROM sleeve_snapshots WHERE sleeve='ETF' "
+            "AND substr(as_of, 1, 10) = ? LIMIT 1", (iso_utc(now)[:10],))
+        if exists:
+            return 0
         return await record_snapshots(self.db, "ETF", rows, now)
 
     async def liquidate_all(self, execute: bool = False) -> list[str]:
