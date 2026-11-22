@@ -1031,8 +1031,12 @@ def _guarded(session: TradingSession, func: Callable[[], Awaitable[None]],
     """
 
     async def wrapper() -> None:
-        # Intraday jobs do nothing on a holiday or a weekend.
-        if not is_trading_day(et_now().date()):
+        # Intraday jobs do nothing on a holiday or a weekend. The
+        # position monitor is exempt: it is the desk's liveness loop -
+        # its per-poll heartbeat feeds the launcher's staleness guard
+        # (F15) seven days a week - and the stale-quote gate (F16)
+        # keeps closed-market evaluation inert.
+        if job_id != "position_monitor" and not is_trading_day(et_now().date()):
             return
         try:
             await func()
